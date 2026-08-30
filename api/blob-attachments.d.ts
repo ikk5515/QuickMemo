@@ -50,6 +50,19 @@ export function safeFileName(value: string): string;
 
 export function lookupCallerUid(idToken: string): Promise<string>;
 
+export function attachmentRateLimitDecision(input: {
+  cost: number;
+  count: number;
+  limit: number;
+  nowMilliseconds: number;
+  windowSeconds: number;
+}): {
+  allow: boolean;
+  nextCount: number;
+  retryAfter: number;
+  windowStartSeconds: number;
+};
+
 export function safeErrorSummary(error: unknown): {
   kind: "error" | "non_error";
   status?: number;

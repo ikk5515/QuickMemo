@@ -24,7 +24,6 @@ import {
   attachmentValidationError,
   formatFileSize,
   maxAttachmentFileLabel,
-  safeAttachmentBaseName,
   safePublicShareAttachmentMimeType
 } from "../../lib/attachments";
 import {
@@ -45,6 +44,7 @@ import type { UserProfile } from "../../types";
 import { downloadBlob } from "./browserDownload";
 import type { DecryptedVaultNote } from "./vaultData";
 import { vaultNoteAttachmentAccess } from "./vaultNoteAttachmentAccess";
+import { privateNoteAttachmentNameFields } from "./noteAttachmentFileName";
 import "./VaultNoteAttachmentsDialog.css";
 
 const attachmentInputAccept = allowedAttachmentExtensions
@@ -168,6 +168,7 @@ export function VaultNoteAttachmentsDialog({
       label: "첨부 가능 여부 확인 중",
       progress: 0
     });
+    let completedFileCount = 0;
     try {
       const serverAttachments = await getAllNoteAttachmentsFromServer(note.id, controller.signal);
       controller.signal.throwIfAborted();
@@ -197,11 +198,12 @@ export function VaultNoteAttachmentsDialog({
         );
         controller.signal.throwIfAborted();
         const extension = attachmentExtension(file.name);
+        const privateName = await privateNoteAttachmentNameFields(file.name, extension, key);
+        controller.signal.throwIfAborted();
         await createNoteAttachment({
           encryptedBlob: encrypted.blob,
           encryption: encrypted.metadata,
           extension,
-          fileName: safeAttachmentBaseName(file.name),
           mimeType: safePublicShareAttachmentMimeType(extension),
           noteId: note.id,
           onUploadProgress: (progress) => {
@@ -216,8 +218,10 @@ export function VaultNoteAttachmentsDialog({
           },
           originalSize: file.size,
           signal: controller.signal,
-          uploadedBy: profile.uid
+          uploadedBy: profile.uid,
+          ...privateName
         });
+        completedFileCount += 1;
       }
       if (activeRef.current) {
         setStatus(valid.length === 1
@@ -227,7 +231,16 @@ export function VaultNoteAttachmentsDialog({
       }
     } catch (caught) {
       if (activeRef.current) {
-        setError(operationErrorMessage(caught, "파일을 암호화해 업로드하지 못했습니다."));
+        if (completedFileCount > 0) {
+          setStatus(`${completedFileCount}개 파일은 암호화해 첨부했습니다.`);
+          setError(
+            caught instanceof DOMException && caught.name === "AbortError"
+              ? `업로드를 취소했습니다. 남은 ${valid.length - completedFileCount}개 파일은 첨부하지 않았습니다.`
+              : `일부 파일만 첨부했습니다. ${completedFileCount}/${valid.length}개 완료 후 작업이 중단되었습니다.`
+          );
+        } else {
+          setError(operationErrorMessage(caught, "파일을 암호화해 업로드하지 못했습니다."));
+        }
       }
     } finally {
       if (uploadControllerRef.current === controller) uploadControllerRef.current = null;

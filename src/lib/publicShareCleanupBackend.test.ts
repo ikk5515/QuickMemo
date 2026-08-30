@@ -64,6 +64,24 @@ describe("public share backend cleanup", () => {
     });
   });
 
+  it("prioritizes expired attachment reservations and records a privacy-safe heartbeat", () => {
+    const cleanupFlow = cleanupFunctionSource.match(
+      /async function cleanupExpiredPublicShares[\s\S]*?function cleanupDurationBucket/u
+    )?.[0] ?? "";
+
+    expect(cleanupFunctionSource).toContain(
+      'const attachmentCleanupHeartbeatDocumentPath = "systemMaintenance/attachmentCleanupHeartbeatV1"'
+    );
+    expect(cleanupFlow).toContain("await cleanupPriorityExpiredAttachmentReservations(config, stats)");
+    expect(cleanupFlow.indexOf("cleanupPriorityExpiredAttachmentReservations"))
+      .toBeLessThan(cleanupFlow.indexOf("cleanupExpiredSecureShareState"));
+    expect(cleanupFunctionSource).toContain('collectionId: "attachmentRateLimits"');
+    expect(cleanupFunctionSource).toContain("attachmentReservationIndexName(");
+    expect(cleanupFunctionSource).toContain("pendingReservationTracked");
+    expect(cleanupFunctionSource).toContain('console.info("public share cleanup completed"');
+    expect(cleanupFunctionSource).not.toContain("console.info(attachmentName");
+  });
+
   it("uses the non-sensitive cleanup queue without Firebase Admin or Cloud Functions", () => {
     const forbiddenBackendPattern = new RegExp(`firebase-${"admin"}|firebase-${"functions"}|serviceAccount`, "i");
 

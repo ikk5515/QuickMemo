@@ -220,6 +220,18 @@ export function liveSyncProductionDefaultsEnabled(
   return clientDefault && serverDefault && blobServerDefault;
 }
 
+export function blobAttachmentAbuseProtectionProductionDefaultEnabled(blobServerSource) {
+  const matches = Array.from(blobServerSource.matchAll(
+    /\bconst\s+blobAttachmentAbuseProtectionProductionDefault\s*=\s*(true|false)\s*;/gu
+  ));
+  if (matches.length !== 1) {
+    throw new Error(
+      "Unable to verify the trusted blobAttachmentAbuseProtectionProductionDefault source default."
+    );
+  }
+  return matches[0][1] === "true";
+}
+
 async function productionDefaultsEnabled(rootDirectory) {
   const [clientSource, apiServerSource, blobServerSource] = await Promise.all([
     readFile(resolve(rootDirectory, "src/lib/secureSharePolicy.ts"), "utf8"),
@@ -230,6 +242,12 @@ async function productionDefaultsEnabled(rootDirectory) {
     clientSource,
     apiServerSource,
     blobServerSource
+  );
+}
+
+async function productionAttachmentProtectionEnabled(rootDirectory) {
+  return blobAttachmentAbuseProtectionProductionDefaultEnabled(
+    await readFile(resolve(rootDirectory, "api/blob-attachments.js"), "utf8")
   );
 }
 
@@ -270,7 +288,15 @@ export async function verifyProductionFirewall({
   probeWhenDisabled = false,
   rootDirectory = process.cwd()
 } = {}) {
-  const productionEnabled = await productionDefaultsEnabled(rootDirectory);
+  const [productionEnabled, attachmentProtectionEnabled] = await Promise.all([
+    productionDefaultsEnabled(rootDirectory),
+    productionAttachmentProtectionEnabled(rootDirectory)
+  ]);
+  if (!attachmentProtectionEnabled) {
+    throw new Error(
+      "Blob attachment abuse protection is not enabled in the reviewed Production source."
+    );
+  }
   if (!productionEnabled && !probeWhenDisabled) {
     return { enforced: false, ok: true };
   }

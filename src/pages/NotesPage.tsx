@@ -102,6 +102,15 @@ import { previewLegacyHtmlToMarkdown } from "../features/markdown/legacyHtml";
 import { noteListSnippet } from "../features/notes/noteListSnippet";
 import { downloadBlob } from "../features/vault/browserDownload";
 import {
+  clearPreparedVaultClipboardImages,
+  prepareVaultClipboardImages
+} from "../features/vault/clipboardImagePaste";
+import {
+  decryptPrivateNoteAttachmentNames,
+  migrateLegacyPrivateNoteAttachmentNames,
+  privateNoteAttachmentNameFields
+} from "../features/vault/noteAttachmentFileName";
+import {
   allowedAttachmentExtensions,
   attachmentDownloadName,
   attachmentExtension,
@@ -121,6 +130,7 @@ import {
   reencryptAttachmentBlob
 } from "../lib/attachmentCrypto";
 import {
+  bytesToBase64,
   decryptText,
   derivePublicShareContentKey,
   encryptText,
@@ -199,6 +209,7 @@ import {
   deleteNoteFolder,
   deleteNoteAttachment,
   getEncryptedNoteAttachmentSource,
+  getAllNoteAttachmentsFromServer,
   getNoteAttachments,
   getNoteRevisionState,
   isLegacyHtmlNoteDocument,
@@ -411,9 +422,6 @@ interface TableControlState {
 
 const fontSizes = editorTextSizes;
 const maxImageDataUrlLength = 760_000;
-const maxInlineImageInputBytes = 20 * 1024 * 1024;
-const maxInlineImagePixels = 20_000_000;
-const inlineImageMimeTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 const autosaveDelayMs = 2500;
 const publicSharePasswordMinLength = 12;
 const deletedNoteRetentionDays = 30;
@@ -440,6 +448,7 @@ export const textPreviewAttachmentExtensions = new Set(["txt", "md", "csv", "jso
 export const legacyBinaryPreviewAttachmentExtensions = new Set(["doc"]);
 const attachmentUploadToastClearDelayMs = 900;
 const attachmentUploadFailureClearDelayMs = 2400;
+const maximumAttachmentBatchFiles = 20;
 
 type AttachmentUploadPhase = "preparing" | "encrypting" | "uploading" | "finalizing" | "syncing" | "complete" | "failed";
 
@@ -2797,6 +2806,7 @@ export function LegacyNotesReadOnlyPage({
   const [legacyUsers, setLegacyUsers] = useState<UserProfile[]>([]);
   const [readonlyAttachments, setReadonlyAttachments] = useState<NoteAttachmentSnapshot[]>([]);
   const [downloadingAttachmentId, setDownloadingAttachmentId] = useState<string | null>(null);
+  const readonlyDownloadControllerRef = useRef<AbortController | null>(null);
   const decryptionCache = useRef<DecryptedNoteCache>(new Map());
   const decryptionGeneration = useRef(0);
   const deferredQueryText = useDeferredValue(queryText);
@@ -2913,18 +2923,43 @@ export function LegacyNotesReadOnlyPage({
   );
 
   useEffect(() => {
-    if (!selectedNote) {
+    if (!selectedNote || !privateKey || !profile) {
       setReadonlyAttachments([]);
       return undefined;
     }
 
+    let active = true;
+    let snapshotGeneration = 0;
     setReadonlyAttachments([]);
-    return subscribeNoteAttachments(
+    const unsubscribe = subscribeNoteAttachments(
       selectedNote.id,
-      setReadonlyAttachments,
+      (nextAttachments) => {
+        const generation = snapshotGeneration + 1;
+        snapshotGeneration = generation;
+        const wrappedKey = selectedNote.wrappedKeys[profile.uid];
+        if (!wrappedKey) {
+          if (active && snapshotGeneration === generation) setReadonlyAttachments(nextAttachments);
+          return;
+        }
+        void unwrapNoteKey(wrappedKey, privateKey)
+          .then((noteKey) => decryptPrivateNoteAttachmentNames(nextAttachments, noteKey))
+          .then((decrypted) => {
+            if (active && snapshotGeneration === generation) setReadonlyAttachments(decrypted);
+          })
+          .catch(() => {
+            if (active && snapshotGeneration === generation) setReadonlyAttachments(nextAttachments);
+          });
+      },
       () => setFeedback("첨부파일 목록을 읽지 못했습니다.")
     );
-  }, [selectedNote]);
+
+    return () => {
+      active = false;
+      readonlyDownloadControllerRef.current?.abort();
+      readonlyDownloadControllerRef.current = null;
+      unsubscribe();
+    };
+  }, [privateKey, profile, selectedNote]);
 
   async function copyMarkdownPreview() {
     if (!markdownPreview || !navigator.clipboard?.writeText) {
@@ -2952,15 +2987,27 @@ export function LegacyNotesReadOnlyPage({
 
     setDownloadingAttachmentId(attachment.id);
     setFeedback(null);
+    const controller = new AbortController();
+    readonlyDownloadControllerRef.current?.abort();
+    readonlyDownloadControllerRef.current = controller;
     try {
       const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-      const encryptedSource = await getEncryptedNoteAttachmentSource(attachment);
-      const blob = await decryptAttachmentToBlob(attachment, noteKey, encryptedSource);
+      controller.signal.throwIfAborted();
+      const encryptedSource = await getEncryptedNoteAttachmentSource(attachment, controller.signal);
+      const blob = await decryptAttachmentToBlob(attachment, noteKey, encryptedSource, controller.signal);
+      controller.signal.throwIfAborted();
       downloadBlob(blob, attachmentDownloadName(attachment));
       setFeedback("첨부파일을 복호화해 다운로드했습니다. 서버 데이터는 변경하지 않았습니다.");
-    } catch {
-      setFeedback("첨부파일을 다운로드하지 못했습니다.");
+    } catch (caught) {
+      setFeedback(
+        caught instanceof DOMException && caught.name === "AbortError"
+          ? "첨부파일 다운로드를 취소했습니다."
+          : "첨부파일을 다운로드하지 못했습니다."
+      );
     } finally {
+      if (readonlyDownloadControllerRef.current === controller) {
+        readonlyDownloadControllerRef.current = null;
+      }
       setDownloadingAttachmentId(null);
     }
   }
@@ -3079,16 +3126,19 @@ export function LegacyNotesReadOnlyPage({
                     <div>
                       {readonlyAttachments.map((attachment) => (
                         <button
+                          aria-label={`${attachmentDownloadName(attachment)} ${downloadingAttachmentId === attachment.id ? "다운로드 취소" : "다운로드"}`}
                           className="secondary-button"
-                          disabled={Boolean(downloadingAttachmentId)}
+                          disabled={Boolean(downloadingAttachmentId && downloadingAttachmentId !== attachment.id)}
                           key={attachment.id}
-                          onClick={() => void downloadReadonlyAttachment(attachment)}
+                          onClick={() => downloadingAttachmentId === attachment.id
+                            ? readonlyDownloadControllerRef.current?.abort()
+                            : void downloadReadonlyAttachment(attachment)}
                           type="button"
                         >
                           {downloadingAttachmentId === attachment.id
                             ? <Loader2 aria-hidden="true" className="spin" size={16} />
                             : <Download aria-hidden="true" size={16} />}
-                          {attachmentDownloadName(attachment)} · {formatFileSize(attachment.originalSize)} 다운로드
+                          {attachmentDownloadName(attachment)} · {formatFileSize(attachment.originalSize)} {downloadingAttachmentId === attachment.id ? "취소" : "다운로드"}
                         </button>
                       ))}
                     </div>
@@ -3227,6 +3277,8 @@ function WritableNotesPage() {
     async () => null
   );
   const attachmentUploadInFlightRef = useRef(false);
+  const attachmentUploadControllerRef = useRef<AbortController | null>(null);
+  const inlineImageControllerRef = useRef<AbortController | null>(null);
   const folderCreationInFlightRef = useRef(false);
   const cursorPublishTimer = useRef<number | null>(null);
   const lastPublishedCursor = useRef<string | null>(null);
@@ -3236,7 +3288,9 @@ function WritableNotesPage() {
   const revisionConflictNoteId = useRef<string | null>(null);
   const activeNoteClientId = useRef(getActiveNoteClientId());
   const attachmentPreviewUrl = useRef<string | null>(null);
+  const attachmentPreviewControllerRef = useRef<AbortController | null>(null);
   const attachmentPreviewGeneration = useRef(0);
+  const attachmentDownloadControllerRef = useRef<AbortController | null>(null);
   const attachmentDownloadGeneration = useRef(0);
   const stoppingDeletedPublicShares = useRef(new Set<string>());
   const resolvingPublicShareUrls = useRef(new Set<string>());
@@ -3256,6 +3310,9 @@ function WritableNotesPage() {
   const decryptedDeletedNoteCache = useRef<DecryptedNoteCache>(new Map());
   const visibleDecryptionGeneration = useRef(0);
   const deletedDecryptionGeneration = useRef(0);
+  const editorNoteOwnerUid = editor.noteId
+    ? notes.find((note) => note.id === editor.noteId)?.ownerUid
+    : undefined;
 
   useEffect(() => {
     if (!privateKey || (requestedNotePanel !== "files" && requestedNotePanel !== "search")) {
@@ -3374,6 +3431,14 @@ function WritableNotesPage() {
       attachmentPreviewUrl.current = null;
     }
 
+    attachmentUploadControllerRef.current?.abort();
+    attachmentUploadControllerRef.current = null;
+    attachmentPreviewControllerRef.current?.abort();
+    attachmentPreviewControllerRef.current = null;
+    attachmentDownloadControllerRef.current?.abort();
+    attachmentDownloadControllerRef.current = null;
+    inlineImageControllerRef.current?.abort();
+    inlineImageControllerRef.current = null;
     attachmentPreviewGeneration.current += 1;
     attachmentDownloadGeneration.current += 1;
 
@@ -3495,6 +3560,14 @@ function WritableNotesPage() {
 
   useEffect(() => {
     return () => {
+      attachmentUploadControllerRef.current?.abort();
+      attachmentUploadControllerRef.current = null;
+      attachmentPreviewControllerRef.current?.abort();
+      attachmentPreviewControllerRef.current = null;
+      attachmentDownloadControllerRef.current?.abort();
+      attachmentDownloadControllerRef.current = null;
+      inlineImageControllerRef.current?.abort();
+      inlineImageControllerRef.current = null;
       attachmentPreviewGeneration.current += 1;
       attachmentDownloadGeneration.current += 1;
 
@@ -3514,13 +3587,40 @@ function WritableNotesPage() {
   }, []);
 
   useEffect(() => {
-    if (!privateKey || !editor.noteId) {
+    if (!privateKey || !editor.noteId || !editor.noteKey) {
       setAttachments([]);
       return undefined;
     }
 
-    return subscribeNoteAttachments(editor.noteId, setAttachments, () => setError("첨부파일 목록을 불러오지 못했습니다."));
-  }, [editor.noteId, privateKey]);
+    let active = true;
+    let snapshotGeneration = 0;
+    const noteKey = editor.noteKey;
+    const migrationController = new AbortController();
+    const unsubscribe = subscribeNoteAttachments(
+      editor.noteId,
+      (nextAttachments) => {
+        const generation = snapshotGeneration + 1;
+        snapshotGeneration = generation;
+        void decryptPrivateNoteAttachmentNames(nextAttachments, noteKey).then((decrypted) => {
+          if (active && snapshotGeneration === generation) setAttachments(decrypted);
+        });
+        if (editorNoteOwnerUid === profile?.uid) {
+          void migrateLegacyPrivateNoteAttachmentNames(
+            nextAttachments,
+            noteKey,
+            migrationController.signal
+          ).catch(() => undefined);
+        }
+      },
+      () => setError("첨부파일 목록을 불러오지 못했습니다.")
+    );
+
+    return () => {
+      active = false;
+      migrationController.abort();
+      unsubscribe();
+    };
+  }, [editor.noteId, editor.noteKey, editorNoteOwnerUid, privateKey, profile?.uid]);
 
   useEffect(() => {
     if (!profile) {
@@ -7401,157 +7501,145 @@ function WritableNotesPage() {
     }
   }
 
-    async function uploadAttachmentFiles(files: File[], targetNote?: AttachmentNoteTarget) {
-      if (attachmentUploadInFlightRef.current) {
-        setError("다른 첨부파일 업로드가 끝난 뒤 다시 시도해주세요.");
-        return;
-      }
+  async function uploadAttachmentFiles(files: File[], targetNote?: AttachmentNoteTarget) {
+    if (attachmentUploadInFlightRef.current) {
+      setError("다른 첨부파일 업로드가 끝난 뒤 다시 시도해주세요.");
+      return;
+    }
 
-      const validFiles: File[] = [];
-      const rejectedFiles: string[] = [];
-      const runId = nextAttachmentUploadRunId();
+    const selectedFiles = files.slice(0, maximumAttachmentBatchFiles);
+    const validFiles: File[] = [];
+    const rejectedFiles: string[] = [];
+    const runId = nextAttachmentUploadRunId();
 
-    files.forEach((file) => {
+    selectedFiles.forEach((file) => {
       const validationError = attachmentValidationError(file);
-
-      if (validationError) {
-        rejectedFiles.push(`${file.name}: ${validationError}`);
-      } else {
-        validFiles.push(file);
-      }
+      if (validationError) rejectedFiles.push(`${file.name}: ${validationError}`);
+      else validFiles.push(file);
     });
-
+    if (files.length > maximumAttachmentBatchFiles) {
+      rejectedFiles.push(`한 번에 최대 ${maximumAttachmentBatchFiles}개까지 선택할 수 있습니다.`);
+    }
     if (!validFiles.length) {
       setError(rejectedFiles[0] ?? "첨부할 수 있는 파일이 없습니다.");
       return;
     }
 
-      attachmentUploadInFlightRef.current = true;
-      setAttachmentUploadProgress({
+    const controller = new AbortController();
+    attachmentUploadControllerRef.current = controller;
+    attachmentUploadInFlightRef.current = true;
+    setAttachmentUploadProgress({
       fileCount: validFiles.length,
       fileIndex: 1,
       fileName: validFiles[0]?.name ?? "첨부파일",
       loadedBytes: 0,
       overallPercent: 0,
       percent: 0,
-      phase: targetNote ? "encrypting" : "preparing",
+      phase: "preparing",
       runId,
       totalBytes: validFiles[0]?.size ?? 0
     });
     setError(null);
+    let completedFileCount = 0;
+    let noteTarget: AttachmentNoteTarget | null = null;
     let uploadSucceeded = false;
 
     try {
-      const noteTarget = targetNote ?? (await ensureCurrentNoteForAttachment());
+      noteTarget = targetNote ?? (await ensureCurrentNoteForAttachment());
+      controller.signal.throwIfAborted();
+      const serverAttachments = await getAllNoteAttachmentsFromServer(noteTarget.noteId, controller.signal);
+      controller.signal.throwIfAborted();
+      if (serverAttachments.length + validFiles.length > publicNoteShareMaxAttachmentCount) {
+        throw new Error(`노트당 파일은 최대 ${publicNoteShareMaxAttachmentCount}개까지 첨부할 수 있습니다.`);
+      }
 
       for (const [fileIndex, file] of validFiles.entries()) {
+        controller.signal.throwIfAborted();
         const fileNumber = fileIndex + 1;
-
-        setAttachmentUploadProgress((current) =>
-          current?.runId === runId
-            ? {
-                ...current,
-                fileIndex: fileNumber,
-                fileName: file.name,
-                loadedBytes: 0,
-                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
-                percent: 0,
-                phase: "encrypting",
-                totalBytes: file.size
-              }
-            : current
-        );
+        setAttachmentUploadProgress((current) => current?.runId === runId ? {
+          ...current,
+          fileIndex: fileNumber,
+          fileName: file.name,
+          loadedBytes: 0,
+          overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
+          percent: 0,
+          phase: "encrypting",
+          totalBytes: file.size
+        } : current);
 
         const encryptedFile = await encryptAttachmentBlob(file, noteTarget.noteKey, (progress) => {
+          if (controller.signal.aborted) return;
           const loadedBytes = Math.min(progress.total, Math.max(0, progress.loaded));
           const percent = clampUploadPercent(progress.percentage || (progress.total ? (loadedBytes / progress.total) * 100 : 0));
-
-          setAttachmentUploadProgress((current) =>
-            current?.runId === runId
-              ? {
-                  ...current,
-                  loadedBytes,
-                  overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
-                  percent,
-                  phase: "encrypting",
-                  totalBytes: progress.total
-                }
-              : current
-          );
-        });
+          setAttachmentUploadProgress((current) => current?.runId === runId ? {
+            ...current,
+            loadedBytes,
+            overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
+            percent,
+            phase: "encrypting",
+            totalBytes: progress.total
+          } : current);
+        }, controller.signal);
+        controller.signal.throwIfAborted();
         const encryptedSize = encryptedFile.metadata.encryptedSize;
-
-        setAttachmentUploadProgress((current) =>
-          current?.runId === runId
-            ? {
-                ...current,
-                loadedBytes: 0,
-                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
-                percent: 0,
-                phase: "uploading",
-                totalBytes: encryptedSize
-              }
-            : current
-        );
-
         const extension = attachmentExtension(file.name);
+        const privateName = await privateNoteAttachmentNameFields(file.name, extension, noteTarget.noteKey);
+        controller.signal.throwIfAborted();
+
+        setAttachmentUploadProgress((current) => current?.runId === runId ? {
+          ...current,
+          loadedBytes: 0,
+          overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 0),
+          percent: 0,
+          phase: "uploading",
+          totalBytes: encryptedSize
+        } : current);
 
         await createNoteAttachment({
           noteId: noteTarget.noteId,
-          fileName: safeAttachmentBaseName(file.name),
           extension,
           mimeType: safePublicShareAttachmentMimeType(extension),
           originalSize: file.size,
           encryptedBlob: encryptedFile.blob,
           encryption: encryptedFile.metadata,
           uploadedBy: unlockedProfile.uid,
+          signal: controller.signal,
           onUploadProgress: (progress) => {
+            if (controller.signal.aborted) return;
             const totalBytes = progress.total || encryptedSize;
             const loadedBytes = Math.min(totalBytes, Math.max(0, progress.loaded));
             const percent = clampUploadPercent(progress.percentage || (totalBytes ? (loadedBytes / totalBytes) * 100 : 0));
-
-            setAttachmentUploadProgress((current) =>
-              current?.runId === runId
-                ? {
-                    ...current,
-                    loadedBytes,
-                    overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
-                    percent,
-                    phase: "uploading",
-                    totalBytes
-                  }
-                : current
-            );
-          }
+            setAttachmentUploadProgress((current) => current?.runId === runId ? {
+              ...current,
+              loadedBytes,
+              overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, percent),
+              percent,
+              phase: "uploading",
+              totalBytes
+            } : current);
+          },
+          ...privateName
         });
-
-        setAttachmentUploadProgress((current) =>
-          current?.runId === runId
-            ? {
-                ...current,
-                loadedBytes: encryptedSize,
-                overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 100),
-                percent: 100,
-                phase: "finalizing",
-                totalBytes: encryptedSize
-              }
-            : current
-        );
+        completedFileCount += 1;
+        setAttachmentUploadProgress((current) => current?.runId === runId ? {
+          ...current,
+          loadedBytes: encryptedSize,
+          overallPercent: attachmentUploadOverallPercent(fileNumber, validFiles.length, 100),
+          percent: 100,
+          phase: "finalizing",
+          totalBytes: encryptedSize
+        } : current);
       }
 
-      setAttachmentUploadProgress((current) =>
-        current?.runId === runId
-          ? {
-              ...current,
-              fileIndex: validFiles.length,
-              fileName: validFiles.length === 1 ? validFiles[0].name : `${validFiles.length}개 첨부파일`,
-              loadedBytes: current.totalBytes,
-              overallPercent: 100,
-              percent: 100,
-              phase: "syncing"
-            }
-          : current
-      );
+      setAttachmentUploadProgress((current) => current?.runId === runId ? {
+        ...current,
+        fileIndex: validFiles.length,
+        fileName: validFiles.length === 1 ? validFiles[0].name : `${validFiles.length}개 첨부파일`,
+        loadedBytes: current.totalBytes,
+        overallPercent: 100,
+        percent: 100,
+        phase: "syncing"
+      } : current);
       await syncPublicSharesForNote(
         noteTarget.noteId,
         noteTarget.noteKey,
@@ -7560,46 +7648,47 @@ function WritableNotesPage() {
         noteTarget.revision
       );
       uploadSucceeded = true;
-
-      setAttachmentUploadProgress((current) =>
-        current?.runId === runId
-          ? {
-              ...current,
-              overallPercent: 100,
-              percent: 100,
-              phase: "complete"
-            }
-          : current
+      setAttachmentUploadProgress((current) => current?.runId === runId ? {
+        ...current,
+        overallPercent: 100,
+        percent: 100,
+        phase: "complete"
+      } : current);
+      setStatus(
+        validFiles.length === 1
+          ? `첨부파일을 업로드했습니다. 최대 ${maxAttachmentFileLabel}까지 가능합니다.`
+          : `첨부파일 ${validFiles.length}개를 업로드했습니다.`
       );
-
-        setStatus(
-          validFiles.length === 1
-            ? `첨부파일을 업로드했습니다. 최대 ${maxAttachmentFileLabel}까지 가능합니다.`
-            : `첨부파일 ${validFiles.length}개를 업로드했습니다.`
-        );
-
-      if (rejectedFiles.length) {
-        setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
+      if (rejectedFiles.length) setError(`일부 파일은 제외했습니다. ${rejectedFiles[0]}`);
+    } catch (caught) {
+      const partialUpload = completedFileCount > 0;
+      if (partialUpload && noteTarget) {
+        setStatus(`${completedFileCount}/${validFiles.length}개 파일은 암호화해 첨부했습니다.`);
       }
-    } catch (error) {
-      if (error instanceof SecureShareOwnerOperationStaleError) {
-        return;
-      }
-      if (error instanceof SecureSharePostCommitCleanupError) {
-        uploadSucceeded = true;
-        setAttachmentUploadProgress((current) =>
-          current?.runId === runId ? { ...current, phase: "complete" } : current
-        );
+      if (caught instanceof SecureSharePostCommitCleanupError && partialUpload) {
         setStatus("첨부파일은 업로드되었고 기존 보안 공유 링크는 이미 차단되었습니다.");
-        setError(error.message);
-        return;
+        setError(caught.message);
+      } else if (caught instanceof DOMException && caught.name === "AbortError") {
+        setError(
+          partialUpload
+            ? `업로드를 취소했습니다. 남은 ${validFiles.length - completedFileCount}개 파일은 첨부하지 않았습니다.`
+            : "첨부파일 업로드를 취소했습니다."
+        );
+      } else if (caught instanceof SecureShareOwnerOperationStaleError && partialUpload) {
+        setError("파일은 첨부했지만 보안 공유 동기화 대상이 바뀌었습니다. 최신 목록을 다시 확인해주세요.");
+      } else {
+        setError(
+          partialUpload
+            ? `일부 파일만 첨부했습니다. ${completedFileCount}/${validFiles.length}개 완료 후 작업이 중단되었습니다.`
+            : notesPageUiErrorMessage(caught, "첨부파일을 업로드하지 못했습니다.")
+        );
       }
-      setAttachmentUploadProgress((current) => (current?.runId === runId ? { ...current, phase: "failed" } : current));
-      setError(notesPageUiErrorMessage(error, "첨부파일을 업로드하지 못했습니다."));
-      } finally {
-        attachmentUploadInFlightRef.current = false;
-        window.setTimeout(
-        () => setAttachmentUploadProgress((current) => (current?.runId === runId ? null : current)),
+      setAttachmentUploadProgress((current) => current?.runId === runId ? { ...current, phase: "failed" } : current);
+    } finally {
+      attachmentUploadInFlightRef.current = false;
+      if (attachmentUploadControllerRef.current === controller) attachmentUploadControllerRef.current = null;
+      window.setTimeout(
+        () => setAttachmentUploadProgress((current) => current?.runId === runId ? null : current),
         uploadSucceeded ? attachmentUploadToastClearDelayMs : attachmentUploadFailureClearDelayMs
       );
     }
@@ -7609,17 +7698,39 @@ function WritableNotesPage() {
     return resolveNoteKey(noteId);
   }
 
-  async function decryptAttachmentFile(noteId: string, attachment: NoteAttachmentSnapshot) {
+  async function decryptAttachmentFile(
+    noteId: string,
+    attachment: NoteAttachmentSnapshot,
+    signal?: AbortSignal
+  ) {
     const noteKey = await noteKeyForDownload(noteId);
-    return decryptAttachmentToBytes(attachment, noteKey, await getEncryptedNoteAttachmentSource(attachment));
+    signal?.throwIfAborted();
+    return decryptAttachmentToBytes(
+      attachment,
+      noteKey,
+      await getEncryptedNoteAttachmentSource(attachment, signal),
+      signal
+    );
   }
 
-  async function decryptAttachmentBlob(noteId: string, attachment: NoteAttachmentSnapshot) {
+  async function decryptAttachmentBlob(
+    noteId: string,
+    attachment: NoteAttachmentSnapshot,
+    signal?: AbortSignal
+  ) {
     const noteKey = await noteKeyForDownload(noteId);
-    return decryptAttachmentToBlob(attachment, noteKey, await getEncryptedNoteAttachmentSource(attachment));
+    signal?.throwIfAborted();
+    return decryptAttachmentToBlob(
+      attachment,
+      noteKey,
+      await getEncryptedNoteAttachmentSource(attachment, signal),
+      signal
+    );
   }
 
   function closeAttachmentPreview() {
+    attachmentPreviewControllerRef.current?.abort();
+    attachmentPreviewControllerRef.current = null;
     attachmentPreviewGeneration.current += 1;
 
     if (attachmentPreviewUrl.current) {
@@ -7631,14 +7742,38 @@ function WritableNotesPage() {
     setAttachmentActionBusy((current) => ({ ...current, previewingId: null }));
   }
 
+  function cancelAttachmentDownload() {
+    attachmentDownloadControllerRef.current?.abort();
+    attachmentDownloadControllerRef.current = null;
+    attachmentDownloadGeneration.current += 1;
+    setAttachmentActionBusy((current) => ({ ...current, downloadingId: null }));
+    setStatus("첨부파일 다운로드를 취소했습니다.");
+  }
+
+  function cancelAttachmentPreview() {
+    attachmentPreviewControllerRef.current?.abort();
+    attachmentPreviewControllerRef.current = null;
+    attachmentPreviewGeneration.current += 1;
+    setAttachmentActionBusy((current) => ({ ...current, previewingId: null }));
+    setStatus("첨부파일 미리보기를 취소했습니다.");
+  }
+
     async function previewAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
       if (!previewableAttachmentExtensions.has(attachment.extension)) {
         setError("이 파일 형식은 미리보기를 지원하지 않습니다.");
         return;
       }
 
+      attachmentDownloadControllerRef.current?.abort();
+      attachmentDownloadControllerRef.current = null;
+      attachmentDownloadGeneration.current += 1;
+      setAttachmentActionBusy((current) => ({ ...current, downloadingId: null }));
+
       const previewGeneration = attachmentPreviewGeneration.current + 1;
       attachmentPreviewGeneration.current = previewGeneration;
+      attachmentPreviewControllerRef.current?.abort();
+      const controller = new AbortController();
+      attachmentPreviewControllerRef.current = controller;
 
       if (attachmentPreviewUrl.current) {
         URL.revokeObjectURL(attachmentPreviewUrl.current);
@@ -7648,6 +7783,9 @@ function WritableNotesPage() {
       setAttachmentPreview(null);
 
       if (attachment.originalSize > maxAttachmentPreviewBytes) {
+        if (attachmentPreviewControllerRef.current === controller) {
+          attachmentPreviewControllerRef.current = null;
+        }
         setAttachmentPreview({
           fileName: attachmentDownloadName(attachment),
           kind: "unsupported",
@@ -7661,7 +7799,7 @@ function WritableNotesPage() {
       setError(null);
 
     try {
-      const plainBytes = await decryptAttachmentFile(noteId, attachment);
+      const plainBytes = await decryptAttachmentFile(noteId, attachment, controller.signal);
 
       if (attachmentPreviewGeneration.current !== previewGeneration) {
         return;
@@ -7805,11 +7943,16 @@ function WritableNotesPage() {
         label: "미리보기",
         text: "이 파일 형식은 앱 내부 미리보기를 지원하지 않습니다."
       });
-    } catch {
+    } catch (caught) {
       if (attachmentPreviewGeneration.current === previewGeneration) {
-        setError("파일 미리보기를 열지 못했습니다.");
+        if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+          setError("파일 미리보기를 열지 못했습니다.");
+        }
       }
       } finally {
+        if (attachmentPreviewControllerRef.current === controller) {
+          attachmentPreviewControllerRef.current = null;
+        }
         if (attachmentPreviewGeneration.current === previewGeneration) {
           setAttachmentActionBusy((current) => ({
             ...current,
@@ -7820,33 +7963,35 @@ function WritableNotesPage() {
     }
 
     async function downloadAttachment(noteId: string, attachment: NoteAttachmentSnapshot) {
+      closeAttachmentPreview();
       const downloadGeneration = attachmentDownloadGeneration.current + 1;
       attachmentDownloadGeneration.current = downloadGeneration;
+      attachmentDownloadControllerRef.current?.abort();
+      const controller = new AbortController();
+      attachmentDownloadControllerRef.current = controller;
       setAttachmentActionBusy((current) => ({ ...current, downloadingId: attachment.id }));
       setError(null);
 
     try {
-      const blob = await decryptAttachmentBlob(noteId, attachment);
+      const blob = await decryptAttachmentBlob(noteId, attachment, controller.signal);
 
       if (attachmentDownloadGeneration.current !== downloadGeneration) {
         return;
       }
 
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = attachmentDownloadName(attachment);
-      anchor.rel = "noopener noreferrer";
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      controller.signal.throwIfAborted();
+      downloadBlob(blob, attachmentDownloadName(attachment));
       setStatus("첨부파일 다운로드를 시작했습니다.");
-    } catch {
+    } catch (caught) {
       if (attachmentDownloadGeneration.current === downloadGeneration) {
-        setError("첨부파일을 다운로드하지 못했습니다.");
+        if (!(caught instanceof DOMException && caught.name === "AbortError")) {
+          setError("첨부파일을 다운로드하지 못했습니다.");
+        }
       }
       } finally {
+        if (attachmentDownloadControllerRef.current === controller) {
+          attachmentDownloadControllerRef.current = null;
+        }
         if (attachmentDownloadGeneration.current === downloadGeneration) {
           setAttachmentActionBusy((current) => ({
             ...current,
@@ -8227,8 +8372,11 @@ function WritableNotesPage() {
   }
 
   async function insertImageFile(file: File, insertHtml: RichEditorInsertHtml) {
+    inlineImageControllerRef.current?.abort();
+    const controller = new AbortController();
+    inlineImageControllerRef.current = controller;
     try {
-      const dataUrl = await imageFileToResizedDataUrl(file);
+      const dataUrl = await imageFileToResizedDataUrl(file, controller.signal);
 
       if (dataUrl.length > maxImageDataUrlLength) {
         setError("이미지 용량이 큽니다. 더 작은 이미지를 선택해주세요.");
@@ -8237,10 +8385,18 @@ function WritableNotesPage() {
 
       const html = imageHtml(dataUrl, file.name);
       const nextHtml = insertHtml(html);
+      controller.signal.throwIfAborted();
       setEditor((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}`, dirty: true }));
       setError(null);
-    } catch {
-      setError("붙여넣은 이미지를 넣지 못했습니다.");
+    } catch (caught) {
+      if (
+        inlineImageControllerRef.current === controller
+        && !(caught instanceof DOMException && caught.name === "AbortError")
+      ) {
+        setError("붙여넣은 이미지를 넣지 못했습니다.");
+      }
+    } finally {
+      if (inlineImageControllerRef.current === controller) inlineImageControllerRef.current = null;
     }
   }
 
@@ -8452,6 +8608,8 @@ function WritableNotesPage() {
                 attachments={attachments}
                 busyState={attachmentActionBusy}
                 canDelete={(attachment) => canDeleteAttachmentForNote(activeRemoteNote, attachment)}
+                onCancelDownload={cancelAttachmentDownload}
+                onCancelPreview={cancelAttachmentPreview}
                 onDelete={(attachment) => void removeAttachment(activeRemoteNote, attachment)}
               onDownload={(attachment) => void downloadAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
               onPreview={(attachment) => void previewAttachment(editor.noteId ?? activeRemoteNote.id, attachment)}
@@ -8466,7 +8624,12 @@ function WritableNotesPage() {
           </div>
           </>
         )}
-        {attachmentUploadProgress && <AttachmentUploadProgressToast progress={attachmentUploadProgress} />}
+        {attachmentUploadProgress && (
+          <AttachmentUploadProgressToast
+            onCancel={() => attachmentUploadControllerRef.current?.abort()}
+            progress={attachmentUploadProgress}
+          />
+        )}
         {previewNote && (
           <NotePreviewModal
             canDelete={canDeleteNote(previewNote)}
@@ -8479,6 +8642,8 @@ function WritableNotesPage() {
             onConfirm={(note) => void confirmSharedNote(note)}
             onDelete={(note) => removePreviewNote(note)}
               onDeleteAttachment={(note, attachment) => removeAttachment(note, attachment)}
+            onCancelAttachmentDownload={cancelAttachmentDownload}
+            onCancelAttachmentPreview={cancelAttachmentPreview}
             onDownloadAttachment={(note, attachment) => void downloadAttachment(note.id, attachment)}
             onPreviewAttachment={(note, attachment) => void previewAttachment(note.id, attachment)}
             onPurge={(note) => void purgePreviewNote(note)}
@@ -12408,7 +12573,13 @@ function PersonalOverview({
   );
 }
 
-function AttachmentUploadProgressToast({ progress }: { progress: AttachmentUploadProgressState }) {
+function AttachmentUploadProgressToast({
+  onCancel,
+  progress
+}: {
+  onCancel: () => void;
+  progress: AttachmentUploadProgressState;
+}) {
   const phaseLabel = attachmentUploadPhaseLabel[progress.phase];
   const overallPercent = clampUploadPercent(progress.overallPercent);
   const filePercent = clampUploadPercent(progress.percent);
@@ -12418,6 +12589,9 @@ function AttachmentUploadProgressToast({ progress }: { progress: AttachmentUploa
       ? `${formatFileSize(progress.loadedBytes)} / ${formatFileSize(progress.totalBytes)}`
       : "업로드 준비 중";
   const isTerminal = progress.phase === "complete" || progress.phase === "failed";
+  const canCancel = progress.phase === "preparing"
+    || progress.phase === "encrypting"
+    || progress.phase === "uploading";
 
   return (
     <aside
@@ -12458,6 +12632,11 @@ function AttachmentUploadProgressToast({ progress }: { progress: AttachmentUploa
         <span>{isTerminal ? phaseLabel : byteLabel}</span>
         <span>{filePercent}%</span>
       </div>
+      {canCancel ? (
+        <button className="secondary-button attachment-upload-cancel" onClick={onCancel} type="button">
+          업로드 취소
+        </button>
+      ) : null}
     </aside>
   );
 }
@@ -12467,6 +12646,8 @@ function AttachmentList({
   busyState,
   canDelete,
   compact = false,
+  onCancelDownload,
+  onCancelPreview,
   onDelete,
   onDownload,
   onPreview
@@ -12475,6 +12656,8 @@ function AttachmentList({
   busyState: AttachmentActionBusyState;
   canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
   compact?: boolean;
+  onCancelDownload: () => void;
+  onCancelPreview: () => void;
   onDelete: (attachment: NoteAttachmentSnapshot) => void;
   onDownload: (attachment: NoteAttachmentSnapshot) => void;
   onPreview?: (attachment: NoteAttachmentSnapshot) => void;
@@ -12524,25 +12707,25 @@ function AttachmentList({
               <div className="attachment-actions">
                 {previewable && onPreview && (
                     <button
-                      aria-label={`${attachmentDownloadName(attachment)} 미리보기`}
+                      aria-label={`${attachmentDownloadName(attachment)} ${previewing ? "미리보기 취소" : "미리보기"}`}
                       className="secondary-button attachment-action"
-                      disabled={deleting || previewing}
-                      onClick={() => onPreview(attachment)}
+                      disabled={deleting}
+                      onClick={() => previewing ? onCancelPreview() : onPreview(attachment)}
                       type="button"
                     >
                       {previewing ? <Loader2 className="spin" size={16} /> : <Eye size={16} />}
-                      미리보기
+                      {previewing ? "취소" : "미리보기"}
                     </button>
                 )}
                 <button
-                    aria-label={`${attachmentDownloadName(attachment)} 다운로드`}
+                    aria-label={`${attachmentDownloadName(attachment)} ${downloading ? "다운로드 취소" : "다운로드"}`}
                     className="secondary-button attachment-action"
-                    disabled={deleting || downloading}
-                    onClick={() => onDownload(attachment)}
+                    disabled={deleting}
+                    onClick={() => downloading ? onCancelDownload() : onDownload(attachment)}
                     type="button"
                   >
                     {downloading ? <Loader2 className="spin" size={16} /> : <Download size={16} />}
-                    다운로드
+                    {downloading ? "취소" : "다운로드"}
                   </button>
                 <button
                     aria-label={`${attachmentDownloadName(attachment)} 삭제`}
@@ -12566,6 +12749,8 @@ function AttachmentListModal({
   attachments,
   busyState,
   canDelete,
+  onCancelDownload,
+  onCancelPreview,
   onClose,
   onDelete,
   onDownload,
@@ -12574,6 +12759,8 @@ function AttachmentListModal({
   attachments: NoteAttachmentSnapshot[];
   busyState: AttachmentActionBusyState;
   canDelete: (attachment: NoteAttachmentSnapshot) => boolean;
+  onCancelDownload: () => void;
+  onCancelPreview: () => void;
   onClose: () => void;
   onDelete: (attachment: NoteAttachmentSnapshot) => void;
   onDownload: (attachment: NoteAttachmentSnapshot) => void;
@@ -12613,7 +12800,9 @@ function AttachmentListModal({
               attachments={attachments}
               busyState={busyState}
               canDelete={canDelete}
-            compact
+              compact
+              onCancelDownload={onCancelDownload}
+              onCancelPreview={onCancelPreview}
             onDelete={onDelete}
             onDownload={onDownload}
             onPreview={onPreview}
@@ -12635,6 +12824,8 @@ function NotePreviewModal({
   note,
   onClose,
   onConfirm,
+  onCancelAttachmentDownload,
+  onCancelAttachmentPreview,
   onDelete,
   onDeleteAttachment,
   onDownloadAttachment,
@@ -12659,6 +12850,8 @@ function NotePreviewModal({
   note: DecryptedNote;
   onClose: () => void;
   onConfirm: (note: DecryptedNote) => void;
+  onCancelAttachmentDownload: () => void;
+  onCancelAttachmentPreview: () => void;
   onDelete: (note: DecryptedNote) => Promise<string | null>;
   onDeleteAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => Promise<boolean>;
   onDownloadAttachment: (note: DecryptedNote, attachment: NoteAttachmentSnapshot) => void;
@@ -12688,15 +12881,26 @@ function NotePreviewModal({
   const [attachmentsOpen, setAttachmentsOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const previewAutosaveTimer = useRef<number | null>(null);
+  const previewImageControllerRef = useRef<AbortController | null>(null);
   const previewEditorRef = useRef<HTMLDivElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
   const latestDraftRef = useRef(draft);
+  const resolveNoteKeyRef = useRef(onResolveNoteKey);
 
   useDialogFocus(dialogRef);
 
   useEffect(() => {
     latestDraftRef.current = draft;
   }, [draft]);
+
+  useEffect(() => {
+    resolveNoteKeyRef.current = onResolveNoteKey;
+  }, [onResolveNoteKey]);
+
+  useEffect(() => () => {
+    previewImageControllerRef.current?.abort();
+    previewImageControllerRef.current = null;
+  }, []);
 
   const requestClose = useCallback(async () => {
     if (saving || closing) {
@@ -12758,13 +12962,42 @@ function NotePreviewModal({
   }, [activityOpen, attachmentsOpen, requestClose, suppressEscape]);
 
   useEffect(() => {
-    if (!attachmentsOpen) {
-      setAttachments([]);
-      return undefined;
-    }
+    let active = true;
+    let snapshotGeneration = 0;
+    const migrationController = new AbortController();
+    setAttachments([]);
+    const unsubscribe = subscribeNoteAttachments(
+      note.id,
+      (nextAttachments) => {
+        const generation = snapshotGeneration + 1;
+        snapshotGeneration = generation;
+        void resolveNoteKeyRef.current(note.id)
+          .then(async (noteKey) => {
+            if (note.ownerUid === currentUid) {
+              void migrateLegacyPrivateNoteAttachmentNames(
+                nextAttachments,
+                noteKey,
+                migrationController.signal
+              ).catch(() => undefined);
+            }
+            return decryptPrivateNoteAttachmentNames(nextAttachments, noteKey);
+          })
+          .then((decrypted) => {
+            if (active && snapshotGeneration === generation) setAttachments(decrypted);
+          })
+          .catch(() => {
+            if (active && snapshotGeneration === generation) setAttachments(nextAttachments);
+          });
+      },
+      () => setModalError("첨부파일 목록을 불러오지 못했습니다.")
+    );
 
-    return subscribeNoteAttachments(note.id, setAttachments, () => setModalError("첨부파일 목록을 불러오지 못했습니다."));
-  }, [attachmentsOpen, note.id]);
+    return () => {
+      active = false;
+      migrationController.abort();
+      unsubscribe();
+    };
+  }, [currentUid, note.id, note.ownerUid]);
 
   useEffect(() => {
     if (!activityOpen) {
@@ -13003,8 +13236,11 @@ function NotePreviewModal({
   }
 
   async function insertPreviewImageFile(file: File, insertHtml: RichEditorInsertHtml) {
+    previewImageControllerRef.current?.abort();
+    const controller = new AbortController();
+    previewImageControllerRef.current = controller;
     try {
-      const dataUrl = await imageFileToResizedDataUrl(file);
+      const dataUrl = await imageFileToResizedDataUrl(file, controller.signal);
 
       if (dataUrl.length > maxImageDataUrlLength) {
         setModalError("이미지 용량이 큽니다. 더 작은 이미지를 선택해주세요.");
@@ -13014,11 +13250,19 @@ function NotePreviewModal({
       const html = imageHtml(dataUrl, file.name);
       const nextHtml = insertHtml(html);
 
+      controller.signal.throwIfAborted();
       setDraft((current) => ({ ...current, body: nextHtml ?? `${current.body}${html}` }));
       setDraftDirty(true);
       setModalError(null);
-    } catch {
-      setModalError("붙여넣은 이미지를 넣지 못했습니다.");
+    } catch (caught) {
+      if (
+        previewImageControllerRef.current === controller
+        && !(caught instanceof DOMException && caught.name === "AbortError")
+      ) {
+        setModalError("붙여넣은 이미지를 넣지 못했습니다.");
+      }
+    } finally {
+      if (previewImageControllerRef.current === controller) previewImageControllerRef.current = null;
     }
   }
 
@@ -13214,12 +13458,23 @@ function NotePreviewModal({
             showAttribution={note.type === "shared" && !renderLegacyPlainText}
           />
         )}
+        <AttachmentList
+          attachments={attachments}
+          busyState={attachmentBusyState}
+          canDelete={(attachment) => canDeleteAttachment(note, attachment)}
+          compact
+          onCancelDownload={onCancelAttachmentDownload}
+          onCancelPreview={onCancelAttachmentPreview}
+          onDelete={(attachment) => void deletePreviewAttachment(attachment)}
+          onDownload={(attachment) => onDownloadAttachment(note, attachment)}
+          onPreview={(attachment) => onPreviewAttachment(note, attachment)}
+        />
         {modalError && <p className="form-error" role="alert">{modalError}</p>}
         <div className="note-preview-trigger-row">
           <button className="secondary-button note-insight-trigger" type="button" onClick={() => setAttachmentsOpen(true)}>
             <Paperclip size={16} />
-            첨부파일 보기
-            {attachmentsOpen ? <span>{attachments.length}개</span> : null}
+            첨부파일 크게 보기
+            <span>{attachments.length}개</span>
           </button>
           <button className="secondary-button note-insight-trigger" type="button" onClick={() => setActivityOpen(true)}>
             <History size={16} />
@@ -13247,6 +13502,8 @@ function NotePreviewModal({
               attachments={attachments}
               busyState={attachmentBusyState}
               canDelete={(attachment) => canDeleteAttachment(note, attachment)}
+              onCancelDownload={onCancelAttachmentDownload}
+              onCancelPreview={onCancelAttachmentPreview}
               onClose={() => setAttachmentsOpen(false)}
               onDelete={(attachment) => void deletePreviewAttachment(attachment)}
             onDownload={(attachment) => onDownloadAttachment(note, attachment)}
@@ -13449,27 +13706,15 @@ function HistoryDiffSummary({
   );
 }
 
-async function imageFileToResizedDataUrl(file: File) {
-  const mimeType = file.type.toLowerCase();
-
-  if (!inlineImageMimeTypes.has(mimeType)) {
-    throw new Error("지원하는 PNG, JPG, WEBP 이미지를 선택해주세요. 움직이는 이미지는 파일로 첨부해주세요.");
-  }
-
-  if (file.size <= 0 || file.size > maxInlineImageInputBytes) {
-    throw new Error("본문 이미지는 20MB 이하만 사용할 수 있습니다.");
-  }
-
-  if (!safeRasterImageBytes(new Uint8Array(await file.arrayBuffer()), mimeType)) {
-    throw new Error("이미지 크기나 형식이 안전 제한을 벗어났습니다.");
-  }
-
-  const objectUrl = URL.createObjectURL(file);
-
+async function imageFileToResizedDataUrl(file: File, signal?: AbortSignal) {
+  const prepared = await prepareVaultClipboardImages([file], { signal });
   try {
-    return await resizeImageDataUrl(objectUrl);
+    signal?.throwIfAborted();
+    const image = prepared[0];
+    if (!image) throw new Error("이미지를 안전하게 준비하지 못했습니다.");
+    return `data:${image.mimeType};base64,${bytesToBase64(image.bytes)}`;
   } finally {
-    URL.revokeObjectURL(objectUrl);
+    clearPreparedVaultClipboardImages(prepared);
   }
 }
 
@@ -13531,32 +13776,4 @@ function normalizeDecodedPreviewText(value: string) {
   }
 
   return `${normalized}${value.slice(segmentStart)}`.trim();
-}
-
-function resizeImageDataUrl(dataUrl: string) {
-  return new Promise<string>((resolve, reject) => {
-    const image = new Image();
-    image.addEventListener("load", () => {
-      if (!image.width || !image.height || image.width * image.height > maxInlineImagePixels) {
-        reject(new Error("이미지 해상도가 너무 큽니다."));
-        return;
-      }
-
-      const scale = Math.min(1, 1280 / Math.max(image.width, image.height));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(image.width * scale));
-      canvas.height = Math.max(1, Math.round(image.height * scale));
-      const context = canvas.getContext("2d");
-
-      if (!context) {
-        reject(new Error("이미지를 처리할 수 없습니다."));
-        return;
-      }
-
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", 0.82));
-    });
-    image.addEventListener("error", () => reject(new Error("이미지를 읽을 수 없습니다.")));
-    image.src = dataUrl;
-  });
 }

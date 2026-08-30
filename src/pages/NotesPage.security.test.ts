@@ -147,22 +147,93 @@ describe("NotesPage security controls", () => {
     expect(notesPageSource).toContain("accept={attachmentInputAccept}");
   });
 
-  it("surfaces controlled Blob upload progress without exposing attachment bytes", () => {
+  it("bounds uploads, preflights server state, and shares one cancellable signal", () => {
     const attachmentUploadFlow =
       notesPageSource.match(/async function uploadAttachmentFiles[\s\S]*?async function noteKeyForDownload/)?.[0] ?? "";
 
     expect(notesPageSource).toContain("AttachmentUploadProgressToast");
     expect(notesPageSource).toContain("role=\"progressbar\"");
+    expect(notesPageSource).toContain("const maximumAttachmentBatchFiles = 20");
+    expect(attachmentUploadFlow).toContain("files.slice(0, maximumAttachmentBatchFiles)");
+    expect(attachmentUploadFlow).toContain(
+      "getAllNoteAttachmentsFromServer(noteTarget.noteId, controller.signal)"
+    );
+    expect(attachmentUploadFlow).toContain(
+      "serverAttachments.length + validFiles.length > publicNoteShareMaxAttachmentCount"
+    );
     expect(notesPageSource).toContain("onUploadProgress: (progress) =>");
     expect(notesPageSource).toContain("attachmentUploadOverallPercent");
     expect(notesPageSource).toContain("encryptAttachmentBlob(file, noteTarget.noteKey");
+    expect(attachmentUploadFlow).toContain("}, controller.signal)");
+    expect(attachmentUploadFlow).toContain("signal: controller.signal");
+    expect(attachmentUploadFlow).toContain("privateNoteAttachmentNameFields(");
     expect(notesPageSource).toContain("reencryptAttachmentBlob(");
     expect(attachmentUploadFlow).not.toContain("new Uint8Array(await file.arrayBuffer())");
     expect(attachmentUploadFlow).not.toContain("encryptBytes(fileBytes");
     expect(attachmentUploadFlow).not.toContain("setAttachmentUploadProgress(encryptedFile");
+    expect(attachmentUploadFlow).toContain("let completedFileCount = 0");
+    expect(attachmentUploadFlow).toContain("completedFileCount += 1");
+    expect(attachmentUploadFlow).toContain("`${completedFileCount}/${validFiles.length}개 파일은 암호화해 첨부했습니다.`");
+    expect(notesPageSource).toContain("onCancel={() => attachmentUploadControllerRef.current?.abort()}");
+    expect(notesPageSource).toContain("업로드 취소");
+  });
+
+  it("uses the bounded clipboard image pipeline with abort and cleanup", () => {
+    const imagePreparationFlow = notesPageSource.match(
+      /async function imageFileToResizedDataUrl[\s\S]*?export function decodeTextAttachmentPreview/
+    )?.[0] ?? "";
+
+    expect(imagePreparationFlow).toContain("prepareVaultClipboardImages([file], { signal })");
+    expect(imagePreparationFlow).toContain("signal?.throwIfAborted()");
+    expect(imagePreparationFlow).toContain("bytesToBase64(image.bytes)");
+    expect(imagePreparationFlow).toContain("clearPreparedVaultClipboardImages(prepared)");
+    expect(notesPageSource).toContain("inlineImageControllerRef.current?.abort()");
+    expect(notesPageSource).toContain("previewImageControllerRef.current?.abort()");
+    expect(notesPageSource).not.toContain("canvas.toDataURL(");
+  });
+
+  it("keeps attachment actions in read and edit views with replaceable cancellation", () => {
+    const notePreviewFlow = notesPageSource.match(
+      /function NotePreviewModal[\s\S]*?function NoteInsightModal/
+    )?.[0] ?? "";
+    const closePreviewFlow = notesPageSource.match(
+      /function closeAttachmentPreview[\s\S]*?function cancelAttachmentDownload/
+    )?.[0] ?? "";
+    const previewDownloadFlow = notesPageSource.match(
+      /async function previewAttachment[\s\S]*?async function uploadPreviewAttachments/
+    )?.[0] ?? "";
+
+    expect(notePreviewFlow).toContain("<RichMemoEditor");
+    expect(notePreviewFlow).toContain("<ReadonlyNoteRenderer");
+    expect(notePreviewFlow).toContain(")}\n        <AttachmentList");
+    expect(notesPageSource).toContain("{editor.noteId && activeRemoteNote && (");
+    expect(closePreviewFlow).toContain("attachmentPreviewControllerRef.current?.abort()");
+    expect(closePreviewFlow).toContain("URL.revokeObjectURL(attachmentPreviewUrl.current)");
+    expect(previewDownloadFlow).toContain("attachmentPreviewControllerRef.current?.abort()");
+    expect(previewDownloadFlow).toContain("attachmentDownloadControllerRef.current?.abort()");
+    expect(previewDownloadFlow).toContain("attachmentDownloadGeneration.current += 1");
+    expect(previewDownloadFlow).toContain("closeAttachmentPreview()");
+    expect(previewDownloadFlow).toContain("decryptAttachmentFile(noteId, attachment, controller.signal)");
+    expect(previewDownloadFlow).toContain("decryptAttachmentBlob(noteId, attachment, controller.signal)");
+    expect(previewDownloadFlow).toContain("downloadBlob(blob, attachmentDownloadName(attachment))");
     expect(notesPageSource).toContain(
-      "safeRasterImageBytes(new Uint8Array(await file.arrayBuffer()), mimeType)",
+      "onClick={() => previewing ? onCancelPreview() : onPreview(attachment)}"
     );
+    expect(notesPageSource).toContain(
+      "onClick={() => downloading ? onCancelDownload() : onDownload(attachment)}"
+    );
+  });
+
+  it("offers upload cancellation only while the active phase can honor it", () => {
+    const progressToastFlow = notesPageSource.match(
+      /function AttachmentUploadProgressToast[\s\S]*?function AttachmentList/
+    )?.[0] ?? "";
+
+    expect(progressToastFlow).toContain('progress.phase === "preparing"');
+    expect(progressToastFlow).toContain('progress.phase === "encrypting"');
+    expect(progressToastFlow).toContain('progress.phase === "uploading"');
+    expect(progressToastFlow).toContain("{canCancel ? (");
+    expect(progressToastFlow).not.toContain("{!isTerminal ? (");
   });
 
   it("allows only validated static raster attachments in the note preview", () => {

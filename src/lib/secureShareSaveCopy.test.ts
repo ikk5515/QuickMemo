@@ -238,6 +238,9 @@ describe("secure share save-copy saga", () => {
     expect(source.copyAttachment).toHaveBeenCalledTimes(2);
     expect(deps.createNoteAttachment).toHaveBeenCalledTimes(2);
     expect(deps.createNoteAttachment).toHaveBeenCalledWith(expect.objectContaining({
+      encryptedFileName: expect.objectContaining({ cipherText: "cipher", iv: "iv" }),
+      fileName: "note-pdf-attachment",
+      privacyVersion: 1,
       secureShareCopyJobId: "copy_job_1234567890"
     }));
     expect(deps.activateSecureShareCopyingNote).toHaveBeenCalledWith({
@@ -425,6 +428,12 @@ describe("secure share save-copy saga", () => {
     expect(uploadSignals.every((taskSignal) =>
       taskSignal instanceof AbortSignal && !taskSignal.aborted
     )).toBe(true);
+    const encryptionSignals = vi.mocked(deps.encryptAttachmentBlob).mock.calls.map(
+      (call) => call[3]
+    );
+    expect(encryptionSignals.every((taskSignal) =>
+      taskSignal instanceof AbortSignal && !taskSignal.aborted
+    )).toBe(true);
   });
 
   it("runs a maximum-size attachment alone between smaller queued files", async () => {
@@ -521,10 +530,12 @@ describe("secure share save-copy saga", () => {
       deferred<{ id: string }>()
     ];
 
-    vi.mocked(deps.createNoteAttachment).mockImplementation((input) => {
-      const index = ["first", "second", "third"].indexOf(input.fileName);
+    let uploadIndex = 0;
+    vi.mocked(deps.createNoteAttachment).mockImplementation(() => {
+      const index = uploadIndex;
+      uploadIndex += 1;
 
-      if (index < 0) {
+      if (index >= uploadGates.length) {
         throw new Error("a fourth task must not start after failure");
       }
       return uploadGates[index].promise as never;
@@ -568,9 +579,12 @@ describe("secure share save-copy saga", () => {
     ]);
     const firstFailureGate = deferred<void>();
     const secondUploadGate = deferred<{ id: string }>();
+    let uploadIndex = 0;
 
-    vi.mocked(deps.createNoteAttachment).mockImplementation(async (input) => {
-      if (input.fileName === "first") {
+    vi.mocked(deps.createNoteAttachment).mockImplementation(async () => {
+      const index = uploadIndex;
+      uploadIndex += 1;
+      if (index === 0) {
         await firstFailureGate.promise;
         throw new BlobAttachmentReservationCleanupError(
           {

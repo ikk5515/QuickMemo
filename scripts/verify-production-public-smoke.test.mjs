@@ -1,0 +1,87 @@
+/* global Response */
+import { describe, expect, it, vi } from "vitest";
+import {
+  validateProductionPage,
+  validateUnauthorizedAttachmentResponse,
+  verifyProductionPublicSmoke
+} from "./verify-production-public-smoke.mjs";
+
+const productionHeaders = {
+  "content-type": "text/html; charset=utf-8",
+  "content-security-policy": "default-src 'self'; frame-ancestors 'none'; object-src 'none'",
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff",
+  "strict-transport-security": "max-age=63072000; includeSubDomains; preload"
+};
+
+describe("production public smoke", () => {
+  it("accepts the hardened application shell and fail-closed attachment API", async () => {
+    const fetchImplementation = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('<div id="root"></div>', {
+        status: 200,
+        headers: productionHeaders
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "로그인이 필요합니다." }), {
+        status: 401,
+        headers: {
+          "cache-control": "no-store, private",
+          "content-type": "application/json; charset=utf-8"
+        }
+      }));
+
+    const originalResponse = globalThis.Response;
+    const result = await verifyProductionPublicSmoke({
+      baseUrl: "https://quickmemo.example",
+      fetchImplementation: async (input, init) => {
+        const response = await fetchImplementation(input, init);
+        Object.defineProperty(response, "url", { value: String(input) });
+        return response;
+      }
+    });
+
+    expect(globalThis.Response).toBe(originalResponse);
+    expect(result).toMatchObject({
+      ok: true,
+      origin: "https://quickmemo.example",
+      pageStatus: 200,
+      attachmentStatus: 401
+    });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a page that loses its anti-framing policy", () => {
+    const response = new Response('<div id="root"></div>', {
+      status: 200,
+      headers: {
+        ...productionHeaders,
+        "content-security-policy": "default-src 'self'; object-src 'none'"
+      }
+    });
+    Object.defineProperty(response, "url", { value: "https://quickmemo.example/" });
+
+    expect(() => validateProductionPage(
+      response,
+      '<div id="root"></div>',
+      "https://quickmemo.example"
+    )).toThrow(/anti-framing/u);
+  });
+
+  it("rejects cached or detail-leaking attachment errors", () => {
+    const response = new Response(JSON.stringify({
+      ok: false,
+      error: "https://private.blob.vercel-storage.com/file"
+    }), {
+      status: 401,
+      headers: {
+        "cache-control": "public, max-age=60",
+        "content-type": "application/json"
+      }
+    });
+
+    expect(() => validateUnauthorizedAttachmentResponse(
+      response,
+      JSON.stringify({ ok: false, error: "https://private.blob.vercel-storage.com/file" })
+    )).toThrow(/cached/u);
+  });
+});

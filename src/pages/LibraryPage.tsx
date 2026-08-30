@@ -52,6 +52,7 @@ import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
 import { LibraryVaultPromotionButton } from "../features/library/LibraryVaultPromotionButton";
 import { LibraryVaultUserError } from "../features/library/libraryVaultErrors";
+import { decryptPrivateNoteAttachmentNames } from "../features/vault/noteAttachmentFileName";
 import {
   attachmentDownloadName,
   formatFileSize,
@@ -704,6 +705,7 @@ export default function LibraryPage() {
   const attachmentGeneration = useRef(0);
   const attachmentActionGeneration = useRef(0);
   const attachmentPreviewController = useRef<AbortController | null>(null);
+  const attachmentDownloadController = useRef<AbortController | null>(null);
   const attachmentExtractionController = useRef<AbortController | null>(null);
   const attachmentExtractionBase = useRef<AttachmentExtractionBase | null>(null);
   const previewObjectUrl = useRef<string | null>(null);
@@ -849,6 +851,8 @@ export default function LibraryPage() {
     setAttachmentExtraction(null);
     attachmentPreviewController.current?.abort();
     attachmentPreviewController.current = null;
+    attachmentDownloadController.current?.abort();
+    attachmentDownloadController.current = null;
     attachmentExtractionController.current?.abort();
     attachmentExtractionController.current = null;
     attachmentExtractionBase.current = null;
@@ -873,6 +877,10 @@ export default function LibraryPage() {
     noteDecryptGeneration.current += 1;
     attachmentGeneration.current += 1;
     attachmentActionGeneration.current += 1;
+    attachmentPreviewController.current?.abort();
+    attachmentPreviewController.current = null;
+    attachmentDownloadController.current?.abort();
+    attachmentDownloadController.current = null;
     attachmentExtractionController.current?.abort();
     attachmentExtractionController.current = null;
     attachmentExtractionBase.current = null;
@@ -1357,7 +1365,6 @@ export default function LibraryPage() {
     }
 
     let cancelled = false;
-    let failures = 0;
 
     void mapWithConcurrency(missing, 4, async (note) => {
       const requestKey = `${note.id}:${attachmentRevision(note)}`;
@@ -1368,10 +1375,27 @@ export default function LibraryPage() {
         attachmentRequests.current.set(requestKey, request);
       }
       try {
-        const attachments = await request;
-        return { attachments, note, success: true };
+        const wrappedKey = note.wrappedKeys[profile.uid];
+        if (!wrappedKey) {
+          throw new Error("이 첨부파일의 암호화 키를 확인할 수 없습니다.");
+        }
+        const [rawAttachments, noteKey] = await Promise.all([
+          request,
+          unwrapNoteKey(wrappedKey, privateKey)
+        ]);
+        const attachments = await decryptPrivateNoteAttachmentNames(rawAttachments, noteKey);
+        if (!cancelled && attachmentGeneration.current === generation) {
+          const revision = attachmentRevision(note);
+          attachmentCache.current.set(`${note.id}:${revision}`, attachments);
+          setAttachmentGroups((current) => ({
+            ...current,
+            [note.id]: { attachments, revision }
+          }));
+        }
       } catch {
-        return { attachments: [] as NoteAttachmentSnapshot[], note, success: false };
+        if (!cancelled && attachmentGeneration.current === generation) {
+          setAttachmentFailureCount((current) => current + 1);
+        }
       } finally {
         if (attachmentRequests.current.get(requestKey) === request) {
           attachmentRequests.current.delete(requestKey);
@@ -1380,23 +1404,6 @@ export default function LibraryPage() {
           setAttachmentProgress((current) => ({ ...current, completed: Math.min(current.total, current.completed + 1) }));
         }
       }
-    }).then((results) => {
-      if (cancelled || attachmentGeneration.current !== generation) {
-        return;
-      }
-
-      results.forEach(({ attachments, note, success }) => {
-        if (!success) {
-          failures += 1;
-          return;
-        }
-
-        const revision = attachmentRevision(note);
-        attachmentCache.current.set(`${note.id}:${revision}`, attachments);
-        nextGroups[note.id] = { attachments, revision };
-      });
-      setAttachmentGroups({ ...nextGroups });
-      setAttachmentFailureCount(failures);
     });
 
     return () => {
@@ -1414,6 +1421,8 @@ export default function LibraryPage() {
       attachmentExtractionBase.current = null;
       attachmentPreviewController.current?.abort();
       attachmentPreviewController.current = null;
+      attachmentDownloadController.current?.abort();
+      attachmentDownloadController.current = null;
       attachmentActionGeneration.current += 1;
 
       if (previewObjectUrl.current) {
@@ -2119,16 +2128,17 @@ export default function LibraryPage() {
     throwIfAttachmentActionAborted(signal);
     const encryptedSource = await getEncryptedNoteAttachmentSource(source.attachment, signal);
     throwIfAttachmentActionAborted(signal);
-    const bytes = await decryptAttachmentToBytes(source.attachment, noteKey, encryptedSource);
+    const bytes = await decryptAttachmentToBytes(source.attachment, noteKey, encryptedSource, signal);
     throwIfAttachmentActionAborted(signal);
     return bytes;
   }
 
-  async function decryptAttachmentBlob(source: VirtualAttachmentItem) {
+  async function decryptAttachmentBlob(source: VirtualAttachmentItem, signal?: AbortSignal) {
     if (!profile || !privateKey) {
       throw new Error("암호화 키가 잠겨 있습니다.");
     }
 
+    throwIfAttachmentActionAborted(signal);
     const wrappedKey = source.note.wrappedKeys[profile.uid];
 
     if (!wrappedKey) {
@@ -2136,14 +2146,18 @@ export default function LibraryPage() {
     }
 
     const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-    const encryptedSource = await getEncryptedNoteAttachmentSource(source.attachment);
-    return decryptAttachmentToBlob(source.attachment, noteKey, encryptedSource);
+    throwIfAttachmentActionAborted(signal);
+    const encryptedSource = await getEncryptedNoteAttachmentSource(source.attachment, signal);
+    throwIfAttachmentActionAborted(signal);
+    return decryptAttachmentToBlob(source.attachment, noteKey, encryptedSource, signal);
   }
 
   function closeAttachmentPreview() {
     attachmentActionGeneration.current += 1;
     attachmentPreviewController.current?.abort();
     attachmentPreviewController.current = null;
+    attachmentDownloadController.current?.abort();
+    attachmentDownloadController.current = null;
 
     if (previewObjectUrl.current) {
       URL.revokeObjectURL(previewObjectUrl.current);
@@ -2175,6 +2189,8 @@ export default function LibraryPage() {
 
     const generation = attachmentActionGeneration.current + 1;
     attachmentActionGeneration.current = generation;
+    attachmentDownloadController.current?.abort();
+    attachmentDownloadController.current = null;
     attachmentPreviewController.current?.abort();
     const controller = new AbortController();
     attachmentPreviewController.current = controller;
@@ -2242,13 +2258,18 @@ export default function LibraryPage() {
 
     const generation = attachmentActionGeneration.current + 1;
     attachmentActionGeneration.current = generation;
+    attachmentPreviewController.current?.abort();
+    attachmentPreviewController.current = null;
+    attachmentDownloadController.current?.abort();
+    const controller = new AbortController();
+    attachmentDownloadController.current = controller;
     setAttachmentBusy(true);
     setError(null);
 
     try {
-      const blob = await decryptAttachmentBlob(source);
+      const blob = await decryptAttachmentBlob(source, controller.signal);
 
-      if (attachmentActionGeneration.current !== generation) {
+      if (controller.signal.aborted || attachmentActionGeneration.current !== generation) {
         return;
       }
 
@@ -2269,12 +2290,15 @@ export default function LibraryPage() {
       downloadCleanupTimers.current.add(timer);
       setStatusMessage("첨부파일 다운로드를 시작했습니다.");
     } catch (caught) {
-      if (attachmentActionGeneration.current === generation) {
+      if (!controller.signal.aborted && attachmentActionGeneration.current === generation) {
         setError(libraryPageErrorMessage(caught, "첨부파일을 다운로드하지 못했습니다."));
       }
     } finally {
       if (attachmentActionGeneration.current === generation) {
         setAttachmentBusy(false);
+      }
+      if (attachmentDownloadController.current === controller) {
+        attachmentDownloadController.current = null;
       }
     }
   }

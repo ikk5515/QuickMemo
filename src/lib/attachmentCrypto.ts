@@ -2,6 +2,7 @@ import {
   encryptedAttachmentChunkSizeBytes,
   encryptedAttachmentOverheadBytes,
   maxAttachmentFileBytes,
+  maxAttachmentPreviewBytes,
   maxChunkedEncryptedAttachmentBytes,
   maxEncryptedAttachmentChunkCount,
   maxEncryptedAttachmentBytes
@@ -9,6 +10,25 @@ import {
 
 export const chunkedAttachmentVersion = 2;
 export const chunkedAttachmentAlgorithm = "AES-GCM-CHUNKED";
+/**
+ * Response.blob() lets browsers spool chunks outside JS arrays but does not
+ * guarantee constant native memory. Constrained devices therefore retain a
+ * lower hard limit even when streaming assembly is available.
+ */
+export const maxConstrainedAttachmentFileBytes = 64 * 1024 * 1024;
+
+export interface AttachmentCryptoRuntimeCapabilities {
+  deviceMemory?: number;
+  mobile?: boolean;
+  streamingBlobAssembly: boolean;
+}
+
+interface AttachmentCryptoNavigatorSignals {
+  maxTouchPoints?: number;
+  platform?: string;
+  userAgent?: string;
+  userAgentData?: { mobile?: boolean };
+}
 
 interface BytesLike {
   toUint8Array: () => Uint8Array;
@@ -76,6 +96,111 @@ function randomBytes(length: number) {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   return bytes;
+}
+
+export function attachmentCryptoMobileRuntime(
+  runtimeNavigator: AttachmentCryptoNavigatorSignals | undefined,
+  coarsePointer = false
+) {
+  if (runtimeNavigator?.userAgentData?.mobile === true || coarsePointer) return true;
+  const userAgent = runtimeNavigator?.userAgent ?? "";
+  if (/Android|iPhone|iPad|iPod|Mobile/iu.test(userAgent)) return true;
+  return runtimeNavigator?.platform === "MacIntel" && (runtimeNavigator.maxTouchPoints ?? 0) > 1;
+}
+
+function detectedAttachmentCryptoRuntime(): AttachmentCryptoRuntimeCapabilities {
+  const runtimeNavigator = typeof navigator === "undefined"
+    ? undefined
+    : navigator as Navigator & {
+        deviceMemory?: number;
+        userAgentData?: { mobile?: boolean };
+      };
+  const coarsePointer = typeof matchMedia === "function"
+    && matchMedia("(pointer: coarse)").matches;
+
+  return {
+    deviceMemory: runtimeNavigator?.deviceMemory,
+    mobile: attachmentCryptoMobileRuntime(runtimeNavigator, coarsePointer),
+    streamingBlobAssembly: typeof ReadableStream !== "undefined" && typeof Response !== "undefined"
+  };
+}
+
+async function yieldAttachmentCryptoTurn(index: number, signal?: AbortSignal) {
+  if ((index + 1) % 2 !== 0) return;
+  signal?.throwIfAborted();
+  const runtimeScheduler = (globalThis as typeof globalThis & {
+    scheduler?: { yield?: () => Promise<void> };
+  }).scheduler;
+  if (typeof runtimeScheduler?.yield === "function") {
+    await runtimeScheduler.yield();
+  } else {
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+  }
+  signal?.throwIfAborted();
+}
+
+export function attachmentCryptoRuntimeFileSizeLimit(
+  capabilities: AttachmentCryptoRuntimeCapabilities = detectedAttachmentCryptoRuntime()
+) {
+  const lowMemory = typeof capabilities.deviceMemory === "number" && capabilities.deviceMemory <= 4;
+  return !capabilities.streamingBlobAssembly || capabilities.mobile === true || lowMemory
+    ? maxConstrainedAttachmentFileBytes
+    : maxAttachmentFileBytes;
+}
+
+function assertAttachmentCryptoRuntimeSize(size: number) {
+  const limit = attachmentCryptoRuntimeFileSizeLimit();
+  if (size > limit) {
+    throw new Error(
+      `이 기기에서는 메모리 보호를 위해 첨부파일을 ${Math.round(limit / (1024 * 1024))}MB 이하로 처리할 수 있습니다.`
+    );
+  }
+}
+
+async function blobFromChunkStream(
+  chunks: AsyncIterable<Uint8Array>,
+  signal?: AbortSignal
+) {
+  if (typeof ReadableStream === "undefined" || typeof Response === "undefined") {
+    const parts: BlobPart[] = [];
+    for await (const chunk of chunks) {
+      signal?.throwIfAborted();
+      // The fallback is limited to constrained runtimes; normalize away a
+      // possible SharedArrayBuffer so Safari's BlobPart contract is satisfied.
+      parts.push(toArrayBuffer(chunk));
+    }
+    return new Blob(parts, { type: "application/octet-stream" });
+  }
+
+  const iterator = chunks[Symbol.asyncIterator]();
+  const stream = new ReadableStream<Uint8Array>({
+    async cancel() {
+      await iterator.return?.();
+    },
+    async pull(controller) {
+      try {
+        const next = await iterator.next();
+        signal?.throwIfAborted();
+        if (next.done) {
+          controller.close();
+        } else {
+          controller.enqueue(next.value);
+        }
+      } catch (caught) {
+        await iterator.return?.().catch(() => undefined);
+        controller.error(caught);
+      }
+    }
+  });
+
+  try {
+    return await new Response(stream, {
+      headers: { "Content-Type": "application/octet-stream" }
+    }).blob();
+  } catch (caught) {
+    await iterator.return?.().catch(() => undefined);
+    throw caught;
+  }
 }
 
 function bytesLikeToUint8Array(value: BytesLike | Uint8Array | undefined, fieldName: string) {
@@ -205,42 +330,46 @@ export async function encryptAttachmentBlob(
   if (originalSize <= 0 || originalSize > maxAttachmentFileBytes) {
     throw new Error("첨부파일 크기가 올바르지 않습니다.");
   }
+  assertAttachmentCryptoRuntimeSize(originalSize);
 
   const chunkSize = encryptedAttachmentChunkSizeBytes;
   const chunkCount = chunkCountForSize(originalSize, chunkSize);
-  const parts: BlobPart[] = [];
   const chunkIvs: Uint8Array[] = [];
   let encryptedSize = 0;
+  const encryptedChunks = (async function* () {
+    for (let index = 0; index < chunkCount; index += 1) {
+      signal?.throwIfAborted();
+      const offset = index * chunkSize;
+      const plainBytes = new Uint8Array(await blobArrayBuffer(file.slice(offset, Math.min(offset + chunkSize, originalSize))));
+      signal?.throwIfAborted();
+      const iv = randomBytes(12);
+      const cipherBuffer = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: toArrayBuffer(iv) },
+        key,
+        toArrayBuffer(plainBytes)
+      );
 
-  for (let index = 0; index < chunkCount; index += 1) {
-    signal?.throwIfAborted();
-    const offset = index * chunkSize;
-    const plainBytes = new Uint8Array(await blobArrayBuffer(file.slice(offset, Math.min(offset + chunkSize, originalSize))));
-    signal?.throwIfAborted();
-    const iv = randomBytes(12);
-    const cipherBytes = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(iv) },
-      key,
-      toArrayBuffer(plainBytes)
-    );
-
-    plainBytes.fill(0);
-    signal?.throwIfAborted();
-    parts.push(cipherBytes);
-    chunkIvs.push(iv);
-    encryptedSize += cipherBytes.byteLength;
-    onProgress?.({
-      loaded: Math.min(originalSize, offset + chunkPlainSize(index, originalSize, chunkSize, chunkCount)),
-      percentage: Math.min(100, ((index + 1) / chunkCount) * 100),
-      total: originalSize
-    });
-  }
+      plainBytes.fill(0);
+      signal?.throwIfAborted();
+      const cipherBytes = new Uint8Array(cipherBuffer);
+      chunkIvs.push(iv);
+      encryptedSize += cipherBytes.byteLength;
+      onProgress?.({
+        loaded: Math.min(originalSize, offset + chunkPlainSize(index, originalSize, chunkSize, chunkCount)),
+        percentage: Math.min(100, ((index + 1) / chunkCount) * 100),
+        total: originalSize
+      });
+      await yieldAttachmentCryptoTurn(index, signal);
+      yield cipherBytes;
+    }
+  })();
+  const blob = await blobFromChunkStream(encryptedChunks, signal);
 
   signal?.throwIfAborted();
   validateChunkedSize(originalSize, encryptedSize, chunkSize, chunkCount);
 
   return {
-    blob: new Blob(parts, { type: "application/octet-stream" }),
+    blob,
     metadata: {
       version: chunkedAttachmentVersion,
       algorithm: chunkedAttachmentAlgorithm,
@@ -274,6 +403,7 @@ async function decryptSingleAttachmentToBlob(
   source: EncryptedAttachmentSource,
   signal?: AbortSignal
 ) {
+  assertAttachmentCryptoRuntimeSize(metadata.originalSize);
   const iv = bytesLikeToUint8Array(metadata.iv, "첨부파일 IV");
 
   if (iv.byteLength !== 12) {
@@ -335,6 +465,12 @@ async function* encryptedChunksFromResponse(
   let completed = false;
   let pending: Uint8Array<ArrayBufferLike> | null = null;
   let pendingOffset = 0;
+  let abortCancellation: Promise<void> | null = null;
+  const cancelReaderFromAbort = () => {
+    abortCancellation ??= reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancelReaderFromAbort, { once: true });
+  if (signal?.aborted) cancelReaderFromAbort();
 
   try {
     for (const encryptedSize of encryptedSizes) {
@@ -398,7 +534,10 @@ async function* encryptedChunksFromResponse(
       }
     }
   } finally {
-    if (!completed) {
+    signal?.removeEventListener("abort", cancelReaderFromAbort);
+    if (abortCancellation) {
+      await abortCancellation;
+    } else if (!completed) {
       await reader.cancel().catch(() => undefined);
     }
 
@@ -412,9 +551,9 @@ async function decryptChunkedAttachmentToBlob(
   source: EncryptedAttachmentSource,
   signal?: AbortSignal
 ) {
+  assertAttachmentCryptoRuntimeSize(metadata.originalSize);
   const chunkMetadata = normalizedChunkedAttachmentMetadata(metadata);
   const encryptedSizes = chunkEncryptedSizes(metadata);
-  const parts: BlobPart[] = [];
   const encryptedChunks =
     source.bytes
       ? encryptedChunksFromBytes(
@@ -425,33 +564,36 @@ async function decryptChunkedAttachmentToBlob(
       : encryptedChunksFromResponse(source.response, encryptedSizes, signal);
   let plainSize = 0;
   let index = 0;
+  const plainChunks = (async function* () {
+    for await (const encryptedChunk of encryptedChunks) {
+      signal?.throwIfAborted();
+      const expectedPlainSize = chunkPlainSize(index, metadata.originalSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
+      const plainBuffer = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: toArrayBuffer(chunkMetadata.chunkIvs[index] ?? new Uint8Array(0)) },
+        key,
+        toArrayBuffer(encryptedChunk)
+      );
+      signal?.throwIfAborted();
+      const plainBytes = new Uint8Array(plainBuffer);
 
-  for await (const encryptedChunk of encryptedChunks) {
-    signal?.throwIfAborted();
-    const expectedPlainSize = chunkPlainSize(index, metadata.originalSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
-    const plainBuffer = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(chunkMetadata.chunkIvs[index] ?? new Uint8Array(0)) },
-      key,
-      toArrayBuffer(encryptedChunk)
-    );
-    signal?.throwIfAborted();
-    const plainBytes = new Uint8Array(plainBuffer);
+      if (plainBytes.byteLength !== expectedPlainSize) {
+        throw new Error("첨부파일 chunk 복호화 크기가 일치하지 않습니다.");
+      }
 
-    if (plainBytes.byteLength !== expectedPlainSize) {
-      throw new Error("첨부파일 chunk 복호화 크기가 일치하지 않습니다.");
+      plainSize += plainBytes.byteLength;
+      index += 1;
+      await yieldAttachmentCryptoTurn(index - 1, signal);
+      yield plainBytes;
     }
-
-    parts.push(plainBuffer);
-    plainSize += plainBytes.byteLength;
-    index += 1;
-  }
+  })();
+  const blob = await blobFromChunkStream(plainChunks, signal);
 
   signal?.throwIfAborted();
   if (index !== chunkMetadata.chunkCount || plainSize !== metadata.originalSize) {
     throw new Error("첨부파일 chunk 복호화 결과가 올바르지 않습니다.");
   }
 
-  return new Blob(parts, { type: "application/octet-stream" });
+  return blob;
 }
 
 export async function decryptAttachmentToBlob(
@@ -471,6 +613,9 @@ export async function decryptAttachmentToBytes(
   source: EncryptedAttachmentSource,
   signal?: AbortSignal
 ) {
+  if (metadata.originalSize > maxAttachmentPreviewBytes) {
+    throw new Error("메모리 미리보기는 25MB 이하 첨부파일만 지원합니다.");
+  }
   const blob = await decryptAttachmentToBlob(metadata, key, source, signal);
   signal?.throwIfAborted();
   return new Uint8Array(await blobArrayBuffer(blob));
@@ -480,50 +625,64 @@ export async function reencryptAttachmentBlob(
   metadata: AttachmentCryptoDocument,
   sourceKey: CryptoKey,
   targetKey: CryptoKey,
-  source: EncryptedAttachmentSource
+  source: EncryptedAttachmentSource,
+  signal?: AbortSignal
 ): Promise<EncryptedAttachmentBlob> {
   if (!isChunkedAttachment(metadata)) {
-    return encryptAttachmentBlob(await decryptSingleAttachmentToBlob(metadata, sourceKey, source), targetKey);
+    return encryptAttachmentBlob(
+      await decryptSingleAttachmentToBlob(metadata, sourceKey, source, signal),
+      targetKey,
+      undefined,
+      signal
+    );
   }
+
+  assertAttachmentCryptoRuntimeSize(metadata.originalSize);
 
   const chunkMetadata = normalizedChunkedAttachmentMetadata(metadata);
   const encryptedSizes = chunkEncryptedSizes(metadata);
   const encryptedChunks =
     source.bytes
-      ? encryptedChunksFromBytes(await sourceToBytes(source, maxChunkedEncryptedAttachmentBytes), encryptedSizes)
-      : encryptedChunksFromResponse(source.response, encryptedSizes);
-  const parts: BlobPart[] = [];
+      ? encryptedChunksFromBytes(await sourceToBytes(source, maxChunkedEncryptedAttachmentBytes, signal), encryptedSizes, signal)
+      : encryptedChunksFromResponse(source.response, encryptedSizes, signal);
   const chunkIvs: Uint8Array[] = [];
   let encryptedSize = 0;
   let index = 0;
+  const nextEncryptedChunks = (async function* () {
+    for await (const encryptedChunk of encryptedChunks) {
+      signal?.throwIfAborted();
+      const expectedPlainSize = chunkPlainSize(index, metadata.originalSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
+      const plainBuffer = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: toArrayBuffer(chunkMetadata.chunkIvs[index] ?? new Uint8Array(0)) },
+        sourceKey,
+        toArrayBuffer(encryptedChunk)
+      );
+      const plainBytes = new Uint8Array(plainBuffer);
 
-  for await (const encryptedChunk of encryptedChunks) {
-    const expectedPlainSize = chunkPlainSize(index, metadata.originalSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
-    const plainBuffer = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(chunkMetadata.chunkIvs[index] ?? new Uint8Array(0)) },
-      sourceKey,
-      toArrayBuffer(encryptedChunk)
-    );
-    const plainBytes = new Uint8Array(plainBuffer);
+      if (plainBytes.byteLength !== expectedPlainSize) {
+        throw new Error("첨부파일 chunk 복호화 크기가 일치하지 않습니다.");
+      }
 
-    if (plainBytes.byteLength !== expectedPlainSize) {
-      throw new Error("첨부파일 chunk 복호화 크기가 일치하지 않습니다.");
+      const nextIv = randomBytes(12);
+      const nextCipherBuffer = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: toArrayBuffer(nextIv) },
+        targetKey,
+        plainBuffer
+      );
+
+      plainBytes.fill(0);
+      signal?.throwIfAborted();
+      const nextCipherBytes = new Uint8Array(nextCipherBuffer);
+      chunkIvs.push(nextIv);
+      encryptedSize += nextCipherBytes.byteLength;
+      index += 1;
+      await yieldAttachmentCryptoTurn(index - 1, signal);
+      yield nextCipherBytes;
     }
+  })();
+  const blob = await blobFromChunkStream(nextEncryptedChunks, signal);
 
-    const nextIv = randomBytes(12);
-    const nextCipherBytes = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: toArrayBuffer(nextIv) },
-      targetKey,
-      plainBuffer
-    );
-
-    plainBytes.fill(0);
-    parts.push(nextCipherBytes);
-    chunkIvs.push(nextIv);
-    encryptedSize += nextCipherBytes.byteLength;
-    index += 1;
-  }
-
+  signal?.throwIfAborted();
   if (index !== chunkMetadata.chunkCount) {
     throw new Error("첨부파일 chunk 재암호화 결과가 올바르지 않습니다.");
   }
@@ -531,7 +690,7 @@ export async function reencryptAttachmentBlob(
   validateChunkedSize(metadata.originalSize, encryptedSize, chunkMetadata.chunkSize, chunkMetadata.chunkCount);
 
   return {
-    blob: new Blob(parts, { type: "application/octet-stream" }),
+    blob,
     metadata: {
       version: chunkedAttachmentVersion,
       algorithm: chunkedAttachmentAlgorithm,

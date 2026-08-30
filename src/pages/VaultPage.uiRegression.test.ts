@@ -261,6 +261,21 @@ describe("Vault workspace UI regression contract", () => {
     expect(source).toContain("HTML → Markdown 복사");
   });
 
+  it("includes bounded, integrity-indexed attachments in explicit Vault ZIP exports", () => {
+    const vaultExport = sourceBetween(
+      "async function exportObsidianZip()",
+      "async function importObsidianZip(file: File)"
+    );
+    expect(vaultExport).toContain("collectVaultAttachmentBackup");
+    expect(vaultExport).toContain("vaultAttachmentBackupByteBudget(baseSources)");
+    expect(vaultExport).toContain("occupiedPaths: baseSources.map((source) => source.path)");
+    expect(vaultExport).toContain("signal: abortController.signal");
+    expect(vaultExport).toContain("attachmentBackup.manifestSource");
+    expect(vaultExport).toContain("복호화된 노트와 첨부파일");
+    expect(source).toContain('aria-label="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기"');
+    expect(source).toContain("QuickMemo-Attachments-Manifest.json");
+  });
+
   it("unwraps durable rewrite errors into actionable concurrent rename and move messages", () => {
     const moveEntry = sourceBetween("async function moveEntryToFolder", "async function moveFolder(");
     const moveFolder = sourceBetween("async function moveFolder(", "async function moveContextTarget(");

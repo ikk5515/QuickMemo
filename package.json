@@ -32,6 +32,7 @@
     "test:e2e:chromium": "playwright test --project=chromium-desktop --project=chromium-mobile-390 --project=chromium-mobile-320 --project=chromium-tablet-768 --project=chromium-tablet-1024-landscape",
     "test:e2e:webkit": "playwright test --project=webkit-desktop --project=webkit-mobile-390 --project=webkit-mobile-320 --project=webkit-tablet-768 --project=webkit-tablet-1024-landscape",
     "verify:gmail-smtp-production": "node scripts/verify-gmail-smtp-production.mjs",
+    "verify:production-public-smoke": "node scripts/verify-production-public-smoke.mjs",
     "emulators": "npx --yes firebase-tools@15.24.0 emulators:start --only auth,firestore,storage,hosting"
   },
   "overrides": {

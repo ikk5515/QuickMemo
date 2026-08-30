@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  blobAttachmentAbuseProtectionProductionDefaultEnabled,
   inspectRevisionRateLimit,
   liveSyncProductionDefaultsEnabled,
   summarizeRevisionRateLimitConfig
@@ -256,6 +257,18 @@ describe("Vercel revision WAF preflight", () => {
       server,
       server.replace("true", "false")
     )).toBe(false);
+  });
+
+  it("requires the reviewed blob attachment abuse protection default", () => {
+    expect(blobAttachmentAbuseProtectionProductionDefaultEnabled(
+      "const blobAttachmentAbuseProtectionProductionDefault = true;"
+    )).toBe(true);
+    expect(blobAttachmentAbuseProtectionProductionDefaultEnabled(
+      "const blobAttachmentAbuseProtectionProductionDefault = false;"
+    )).toBe(false);
+    expect(() => blobAttachmentAbuseProtectionProductionDefaultEnabled(
+      "const blobAttachmentAbuseProtectionProductionDefault: boolean = true;"
+    )).toThrow(/Unable to verify/u);
   });
 
   it("fails closed when either trusted source default loses its reviewed literal syntax", () => {

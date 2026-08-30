@@ -17,8 +17,8 @@ describe("Secure Share attachment reuse integration guards", () => {
     expect(notesPage).toContain("sourceEncryptionVersion: fingerprint?.encryptionVersion");
     expect(blobClient).toContain("sourceAttachmentDigest: input.sourceAttachmentDigest ?? null");
     expect(blobBackend).toContain("sourceAttachmentFingerprintMatches(");
-    expect(blobBackend).toContain("fields.sourceAttachmentDigest = stringValue(");
-    expect(blobBackend).toContain("fields.sourceEncryptionVersion = integerValue(");
+    expect(blobBackend).toContain("baseFields.sourceAttachmentDigest = stringValue(");
+    expect(blobBackend).toContain("baseFields.sourceEncryptionVersion = integerValue(");
   });
 
   it("uploads only the changed partition and commits retained generation membership atomically", () => {
