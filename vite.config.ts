@@ -25,6 +25,10 @@ export default defineConfig({
             return "editor";
           }
 
+          if (id.includes("/firebase/storage/") || id.includes("/@firebase/storage/")) {
+            return "firebase-storage";
+          }
+
           if (id.includes("/firebase/") || id.includes("/@firebase/")) {
             return "firebase";
           }

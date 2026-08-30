@@ -10,7 +10,6 @@ import {
   getFirestore,
   initializeFirestore
 } from "firebase/firestore";
-import { connectStorageEmulator, getStorage, type FirebaseStorage } from "firebase/storage";
 
 const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID || "quickmemo-demo";
 
@@ -51,29 +50,9 @@ export const db = forceE2eFirestoreLongPolling
       experimentalForceLongPolling: true
     })
   : getFirestore(app);
-let legacyStorage: FirebaseStorage | null = null;
 export const legacyFirebaseStorageEnabled =
   firebaseEmulatorsEnabled
   || import.meta.env.VITE_LEGACY_FIREBASE_STORAGE_ENABLED === "true";
-
-/**
- * Firebase Storage is a legacy-read-only fallback. New attachments use
- * authenticated Vercel Blob routes, so production must not initialize the
- * Storage SDK unless a document explicitly contains a legacy storagePath.
- */
-export function getLegacyStorage() {
-  if (!legacyFirebaseStorageEnabled) {
-    throw new Error("Legacy attachment storage is unavailable");
-  }
-  if (legacyStorage) return legacyStorage;
-
-  legacyStorage = getStorage(app);
-  if (firebaseEmulatorsEnabled) {
-    connectStorageEmulator(legacyStorage, "127.0.0.1", 9199);
-  }
-
-  return legacyStorage;
-}
 export const appCheckSiteKey = import.meta.env.VITE_RECAPTCHA_ENTERPRISE_SITE_KEY;
 export const appCheck =
   appCheckSiteKey && !firebaseEmulatorsEnabled

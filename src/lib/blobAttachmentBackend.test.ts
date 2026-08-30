@@ -558,12 +558,21 @@ describe("blob attachment backend", () => {
 
   it("allows Blob callbacks and client completion requests to mark uploads ready idempotently", () => {
     const markReadySource = blobAttachmentApiSource.match(/async function markAttachmentReady[\s\S]*?async function onUploadCompleted/u)?.[0] ?? "";
+    const uploadedBlobValidationIndex = markReadySource.indexOf("await validateUploadedBlob(");
+    const attachmentReadIndex = markReadySource.indexOf("await firestoreGetDocument(");
+    const readyActionIndex = markReadySource.indexOf("attachmentReadyAction");
+    const counterTransitionIndex = markReadySource.indexOf("noteReadyAttachmentCountTransition(note, 1)");
 
     expect(markReadySource).toContain("attachmentReadyAction");
     expect(markReadySource).toContain("currentDocument: { updateTime: attachment.updateTime }");
     expect(markReadySource).toContain("currentDocument: { updateTime: note.updateTime }");
     expect(markReadySource).toContain('attachmentRevision: integerValue(valueInteger(note, "attachmentRevision") + 1)');
+    expect(markReadySource).toContain("readyAttachmentCount.state === \"invalid\"");
+    expect(markReadySource).toContain("noteFields.readyAttachmentCount = integerValue(readyAttachmentCount.nextCount)");
     expect(markReadySource).toContain('"reservationExpiresAt"');
+    expect(uploadedBlobValidationIndex).toBeGreaterThanOrEqual(0);
+    expect(uploadedBlobValidationIndex).toBeLessThan(attachmentReadIndex);
+    expect(counterTransitionIndex).toBeGreaterThan(readyActionIndex);
   });
 
   it("binds secure-share copy reservations and ready counts to the durable note job", () => {
@@ -600,6 +609,11 @@ describe("blob attachment backend", () => {
 
     expect(beginDeleteSource).toContain("shouldBumpAttachmentRevisionOnDelete");
     expect(beginDeleteSource).toContain('noteFields.attachmentRevision = integerValue(valueInteger(note, "attachmentRevision") + 1)');
+    expect(beginDeleteSource).toContain('valueHasField(attachment, "isReady")');
+    expect(beginDeleteSource).toContain('valueBoolean(attachment, "isReady")');
+    expect(beginDeleteSource).toContain("noteReadyAttachmentCountTransition(note, -1)");
+    expect(beginDeleteSource).toContain("readyAttachmentCount.state === \"invalid\"");
+    expect(beginDeleteSource).toContain("noteFields.readyAttachmentCount = integerValue(readyAttachmentCount.nextCount)");
     expect(beginDeleteSource).toContain('noteFields.updatedBy = stringValue(noteUpdatedByUid)');
     expect(beginDeleteSource).toContain('fieldPath: "updatedAt"');
     expect(beginDeleteSource).toContain('attachmentRevisionBumped = booleanValue(true)');

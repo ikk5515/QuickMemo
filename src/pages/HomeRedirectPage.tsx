@@ -4,6 +4,7 @@ import { Navigate } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { useAuth } from "../context/AuthContext";
 import { resolveAccessibleHome } from "../lib/featureAccess";
+import { preloadProtectedRoute } from "../lib/routePreload";
 import { normalizePrimaryScheduleView, scheduleViewHref } from "../lib/scheduleNavigation";
 import { defaultUserPreferences, getCachedUserPreferences, getUserPreferences } from "../services/userPreferences";
 import type { UserPreferencesDocument } from "../types";
@@ -69,6 +70,12 @@ export default function HomeRedirectPage() {
 
     return accessibleHome === "library" ? "/library" : accessibleHome === "notes" ? "/app?panel=files" : null;
   }, [accessibleHome, scheduleTarget]);
+
+  useEffect(() => {
+    if (preferencesResolved && startTarget) {
+      preloadProtectedRoute(startTarget, profile);
+    }
+  }, [preferencesResolved, profile, startTarget]);
 
   if (!profile) {
     return <Navigate to="/login" replace />;

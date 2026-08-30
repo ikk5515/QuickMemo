@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const firebaseSource = readFileSync(join(process.cwd(), "src/lib/firebase.ts"), "utf8");
+const legacyStorageSource = readFileSync(
+  join(process.cwd(), "src/lib/legacyFirebaseStorage.ts"),
+  "utf8"
+);
 const appSource = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
 const adminFunctionsSource = readFileSync(
   join(process.cwd(), "src/services/adminFunctions.ts"),
@@ -43,19 +47,17 @@ describe("Firebase Storage activation boundary", () => {
   });
 
   it("does not initialize the legacy client SDK at module load", () => {
-    expect(firebaseSource).not.toContain("export const storage = getStorage(app)");
-    const getter = firebaseSource.match(
-      /export function getLegacyStorage[\s\S]*?return legacyStorage;\n\}/u
-    )?.[0] ?? "";
-    expect(getter).toContain("if (!legacyFirebaseStorageEnabled)");
-    expect(getter).toContain("legacyStorage = getStorage(app)");
-    expect(getter).toContain("connectStorageEmulator(legacyStorage");
+    expect(firebaseSource).not.toContain('from "firebase/storage"');
+    expect(legacyStorageSource).toContain('import("firebase/storage")');
+    expect(legacyStorageSource).toContain("if (!legacyFirebaseStorageEnabled)");
+    expect(legacyStorageSource).toContain("legacyStorage = storageModule.getStorage(app)");
+    expect(legacyStorageSource).toContain("storageModule.connectStorageEmulator(legacyStorage");
   });
 
   it("uses the lazy fallback only after inline and Vercel Blob paths are absent", () => {
     for (const source of [notesSource, publicSharesSource]) {
       const firstBlobBranch = source.indexOf("if (attachment.blobPath)");
-      const legacyCall = source.indexOf("ref(getLegacyStorage(), attachment.storagePath)");
+      const legacyCall = source.indexOf("getLegacyStorageBytes(attachment.storagePath");
       expect(firstBlobBranch).toBeGreaterThan(-1);
       expect(legacyCall).toBeGreaterThan(firstBlobBranch);
     }

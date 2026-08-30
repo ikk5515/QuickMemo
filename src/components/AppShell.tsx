@@ -30,6 +30,7 @@ import {
   type ResolvedTheme
 } from "../lib/theme";
 import { normalizePrimaryScheduleView } from "../lib/scheduleNavigation";
+import { preloadProtectedRoute } from "../lib/routePreload";
 import {
   defaultMatrixLabels,
   matrixLabelFields,
@@ -306,6 +307,10 @@ export function AppShell({
     }
   }
 
+  function preloadNavigation(destination: string) {
+    preloadProtectedRoute(destination, profile);
+  }
+
   const activeWorkspaceLabel = navigationItems.find((item) => item.section === activeWorkspaceSection)?.label
     ?? (variant === "vault" ? "암호화 Vault" : "작업공간");
 
@@ -348,6 +353,8 @@ export function AppShell({
           aria-label="QuickMemo 작업공간"
           className="brand obsidian-titlebar-brand"
           to="/home"
+          onFocus={() => preloadNavigation("/home")}
+          onPointerEnter={() => preloadNavigation("/home")}
           onClick={guardedNavigation("/home", () => {
             setWorkspaceDrawerOpen(false);
             onNavigateHome?.();
@@ -417,6 +424,8 @@ export function AppShell({
                     data-workspace-section={item.section}
                     key={item.section}
                     onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
+                    onFocus={() => preloadNavigation(item.href)}
+                    onPointerEnter={() => preloadNavigation(item.href)}
                     title={item.label}
                     to={item.href}
                   >
@@ -478,6 +487,8 @@ export function AppShell({
                         className={`obsidian-drawer-link ${active ? "active" : ""}`}
                         key={item.section}
                         onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
+                        onFocus={() => preloadNavigation(item.href)}
+                        onPointerEnter={() => preloadNavigation(item.href)}
                         to={item.href}
                       >
                         <Icon size={18} />

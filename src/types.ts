@@ -117,6 +117,8 @@ export interface NoteDocument {
   revision?: number;
   lastMutationId?: string;
   attachmentRevision?: number;
+  /** Server-owned projection. Missing means attachment count is unknown. */
+  readyAttachmentCount?: number;
   secureShareCopyState?: SecureShareCopyState;
   secureShareCopyJobId?: string;
   secureShareCopyExpectedAttachmentCount?: number;

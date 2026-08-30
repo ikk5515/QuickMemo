@@ -515,18 +515,23 @@ describe("LibraryPage", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("merges encrypted saved items with currently accessible note attachments and searches both", async () => {
-    const user = userEvent.setup();
+  it("keeps Korean IME search input controlled while filtering saved items and attachments", async () => {
     renderPage();
 
     expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
     expect(serviceMocks.getNoteAttachments).toHaveBeenCalledWith("note-a");
 
-    await user.type(screen.getByRole("searchbox", { name: "자료 검색" }), "체크리스트");
+    const searchInput = screen.getByRole("searchbox", { name: "자료 검색" });
+    fireEvent.compositionStart(searchInput);
+    fireEvent.change(searchInput, { target: { value: "체크리스트" } });
+    expect(searchInput).toHaveValue("체크리스트");
+    fireEvent.compositionEnd(searchInput);
 
-    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    });
   });
 
   it("decrypts protected attachment filenames before adding them to the Library", async () => {
@@ -549,6 +554,26 @@ describe("LibraryPage", () => {
 
     expect(await screen.findByRole("button", { name: "비밀 자료.pdf 열기" })).toBeInTheDocument();
     expect(screen.queryByText(/note-pdf-attachment/u)).not.toBeInTheDocument();
+  });
+
+  it("skips only notes with a server-confirmed zero ready attachment count", async () => {
+    const emptyNote = {
+      ...noteSnapshot(),
+      id: "note-empty",
+      readyAttachmentCount: 0
+    };
+    serviceMocks.subscribeVisibleNotes.mockImplementation((_uid, _ownerUids, callback, onError) => {
+      testData.noteErrorSubscriber = onError;
+      testData.noteSubscriber = callback;
+      callback([emptyNote, noteSnapshot()]);
+      return vi.fn();
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: "운영-체크리스트.pdf 열기" })).toBeInTheDocument();
+    expect(serviceMocks.getNoteAttachments).toHaveBeenCalledWith("note-a");
+    expect(serviceMocks.getNoteAttachments).not.toHaveBeenCalledWith("note-empty");
   });
 
   it("shows each authorized note attachment group as soon as its request finishes", async () => {
@@ -588,6 +613,35 @@ describe("LibraryPage", () => {
 
     act(() => resolveSecond([secondAttachment]));
     expect(await screen.findByRole("button", { name: "나중-도착.pdf 열기" })).toBeInTheDocument();
+  });
+
+  it("cancels a queued attachment publication when the Library unmounts", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveAttachments!: (attachments: ReturnType<typeof attachmentSnapshot>[]) => void;
+      serviceMocks.getNoteAttachments.mockImplementation(() => new Promise((resolve) => {
+        resolveAttachments = resolve;
+      }));
+
+      const view = renderPage();
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(serviceMocks.getNoteAttachments).toHaveBeenCalledWith("note-a");
+
+      await act(async () => {
+        resolveAttachments([attachmentSnapshot()]);
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      view.unmount();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("loads a specifically requested old note, filters to its attachments, and clears the source-note filter", async () => {
