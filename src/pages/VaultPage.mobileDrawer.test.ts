@@ -56,7 +56,7 @@ describe("Vault mobile drawer accessibility contract", () => {
     expect(tabBarSource.indexOf('className="vault-tab-strip"')).toBeLessThan(
       tabBarSource.indexOf('className="vault-tab-actions"')
     );
-    expect(tabBarSource).toMatch(/<div[^>]+className="vault-tab-strip"[\s\S]*<div className="vault-tab-actions" role="presentation">/u);
+    expect(tabBarSource).toMatch(/<MemoTabStrip[^>]+className="vault-tab-strip"[\s\S]*<div className="vault-tab-actions" role="presentation">/u);
     expect(tabBarSource).toMatch(/className="vault-tab-actions"[\s\S]*aria-label="새 노트 탭"[\s\S]*aria-label=\{rightOpen \? "오른쪽 패널 닫기" : "오른쪽 패널 열기"\}/u);
     expect(tabBarSource).toContain('aria-label="탭 그룹 선택"');
 

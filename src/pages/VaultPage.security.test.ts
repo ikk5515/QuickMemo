@@ -112,8 +112,9 @@ describe("VaultPage security boundaries", () => {
 
   it("invalidates path-rewrite continuations at every Vault access-scope boundary", () => {
     const scopeClear = vaultPageSource.match(
-      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[decryptionSession, editorSessionStore, resetPastedImageFolderRuntime\]\);/u
+      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[decryptionSession, editorSessionStore, memoTabMotion, resetPastedImageFolderRuntime\]\);/u
     )?.[0] ?? "";
+    expect(scopeClear).toContain("memoTabMotion.clear();");
     expect(scopeClear).toContain("pathRewriteRecoveryGenerationRef.current += 1;");
     expect(scopeClear).toContain("editorSessionStore.clear()");
     expect(scopeClear).toContain("composingEntryIdsRef.current.clear()");

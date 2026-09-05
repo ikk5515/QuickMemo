@@ -160,6 +160,11 @@ describe("CodeMirrorMarkdownEditor", () => {
     fireEvent.keyDown(first.contentDOM, { key: "s", ctrlKey: true });
     await act(async () => { await Promise.resolve(); });
     view.rerender(<CodeMirrorMarkdownEditor {...props("b")} />);
+    const savedScroll = store.read("owner", "a", "Alpha edited")?.scrollSnapshot;
+    expect(savedScroll).toBeDefined();
+    // Retain a document coordinate, never a view/DOM tree or duplicated text.
+    expect(Object.values(savedScroll!.value).some((value) => value instanceof Node || value instanceof EditorView)).toBe(false);
+    expect(JSON.stringify(savedScroll!.value)).not.toContain("Alpha edited");
     const second = EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!;
     act(() => second.dispatch({ changes: { from: 4, insert: " other" }, annotations: Transaction.userEvent.of("input.type") }));
     view.rerender(<CodeMirrorMarkdownEditor {...props("a")} />);
@@ -174,6 +179,26 @@ describe("CodeMirrorMarkdownEditor", () => {
     store.clear();
     view.unmount();
     expect(store.read("owner", "a", "Alpha")).toBeNull();
+  });
+
+  it("does not apply a previous document's scroll target to a remote replacement or corrupt history", () => {
+    const store = new MarkdownEditorSessionStore("owner");
+    const oldBody = "long document".repeat(20);
+    const target = EditorView.scrollIntoView(100) as ReturnType<EditorView["scrollSnapshot"]>;
+    const usedTarget = vi.spyOn(target, "is");
+    store.write("owner", "a", store.generation, {
+      state: { doc: oldBody }, scrollTop: 100, scrollLeft: 0, scrollSnapshot: target
+    });
+    const view = render(<CodeMirrorMarkdownEditor documentKey="a" sessionStore={store} sessionScopeKey="owner" value="short" onChange={() => {}} />);
+    expect(screen.getByRole("textbox", { name: "Markdown 편집기" })).toHaveTextContent("short");
+    expect(usedTarget).not.toHaveBeenCalled();
+    view.unmount();
+    store.write("owner", "broken", store.generation, {
+      state: { doc: "short", history: { done: null, undone: null } },
+      scrollTop: 100, scrollLeft: 0, scrollSnapshot: target
+    });
+    render(<CodeMirrorMarkdownEditor documentKey="broken" sessionStore={store} sessionScopeKey="owner" value="short" onChange={() => {}} />);
+    expect(usedTarget).not.toHaveBeenCalled();
   });
 
   it("waits for CM's deferred DOM read before saving and cancels completion for a newer composition or disposed editor", async () => {

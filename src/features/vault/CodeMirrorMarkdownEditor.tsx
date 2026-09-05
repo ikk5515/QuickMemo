@@ -27,6 +27,7 @@ import type {
   MarkdownTagClickHandler
 } from "../markdown";
 import { constructWithFrameDeferredResizeObserver } from "./frameDeferredResizeObserver";
+import { captureMarkdownEditorScroll } from "./markdownEditorScroll";
 import { afterCompositionDomSync } from "./afterCompositionDomSync";
 import {
   inlineLivePreview,
@@ -636,9 +637,11 @@ export function CodeMirrorMarkdownEditor({
           })
         ];
     let state: EditorState;
+    let restoredState = false;
     if (storedSession) {
       try {
         state = EditorState.fromJSON(storedSession.state, { extensions }, { history: historyField });
+        restoredState = true;
       } catch {
         // A remote edit or incompatible history snapshot starts a clean session.
         state = EditorState.create({ doc: value, extensions });
@@ -646,7 +649,10 @@ export function CodeMirrorMarkdownEditor({
     } else {
       state = EditorState.create({ doc: value, extensions });
     }
-    const view = constructWithFrameDeferredResizeObserver(window, () => new EditorView({ parent, state }));
+    const scrollSnapshot = restoredState ? storedSession?.scrollSnapshot : undefined;
+    const view = constructWithFrameDeferredResizeObserver(window, () => new EditorView({
+      parent, state, scrollTo: scrollSnapshot
+    }));
 
     const handleLivePreviewKeyboardOpen = (event: Event) => {
       if (!(event instanceof CustomEvent)) return;
@@ -666,10 +672,12 @@ export function CodeMirrorMarkdownEditor({
     view.dom.addEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
 
     viewRef.current = view;
-    if (storedSession) {
+    if (storedSession && restoredState) {
       view.scrollDOM.scrollTop = storedSession.scrollTop;
       view.scrollDOM.scrollLeft = storedSession.scrollLeft;
-      view.requestMeasure({
+      // The CM snapshot keeps the same document anchor while virtualized line
+      // heights settle. A later raw scrollTop write races that adjustment.
+      if (!scrollSnapshot) view.requestMeasure({
         read: () => undefined,
         write: () => {
           if (viewRef.current !== view) return;
@@ -693,8 +701,7 @@ export function CodeMirrorMarkdownEditor({
         if (documentKey && sessionScopeKey && sessionGeneration !== undefined) {
           sessionStore?.write(sessionScopeKey, documentKey, sessionGeneration, {
             state: view.state.toJSON({ history: historyField }),
-            scrollTop: view.scrollDOM.scrollTop,
-            scrollLeft: view.scrollDOM.scrollLeft
+            ...captureMarkdownEditorScroll(view)
           });
         }
       }

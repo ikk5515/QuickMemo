@@ -1,7 +1,11 @@
+import type { EditorView } from "@codemirror/view";
+
 export interface MarkdownEditorSnapshot {
   state: { doc: string; selection?: unknown; history?: unknown };
   scrollTop: number;
   scrollLeft: number;
+  /** CM's document anchor and offset, with no DOM/view or document text. */
+  scrollSnapshot?: ReturnType<EditorView["scrollSnapshot"]>;
 }
 
 /** Plaintext editor history stays in this explicitly scoped, bounded memory cache only. */

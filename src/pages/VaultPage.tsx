@@ -65,6 +65,7 @@ import { AppShell } from "../components/AppShell";
 import { useModalFocus } from "../lib/useModalFocus";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { VaultLegacyNote } from "../features/vault/VaultLegacyNote";
+import { MemoTabMotionBoundary, MemoTabStrip } from "../features/vault/MemoTabStrip";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useVaultDecryptionSession } from "../context/VaultDecryptionContext";
 import type { VaultDecryptionSession } from "../features/vault/vaultDecryptionSession";
@@ -1716,6 +1717,8 @@ function UnlockedVaultPage({
   const [users, setUsers] = useState<UserProfile[]>([]);
   const ownerIds = useMemo(() => visibleVaultOwnerIds(profile, users), [profile, users]);
   const ownerIdKey = ownerIds?.join("\n") ?? "admin";
+  const memoTabMotion = useMemo(() => new MemoTabMotionBoundary(), []);
+  const memoMotionScope = useMemo(() => ({ uid: profile.uid, privateKey, ownerIdKey }), [profile.uid, privateKey, ownerIdKey]);
   const plaintextScopeKey = useMemo(
     () => vaultPlaintextScopeSignature(rawNotes, profile.uid, ownerIdKey),
     [ownerIdKey, profile.uid, rawNotes]
@@ -2491,6 +2494,7 @@ function UnlockedVaultPage({
     // Authorization changes are a synchronous plaintext boundary. WebCrypto,
     // Firestore callbacks, and worker messages cannot be cancelled reliably,
     // so invalidate every continuation before clearing all note-derived state.
+    memoTabMotion.clear();
     decryptionSession.clear();
     workspaceInteractionDuringLoadRef.current.clear();
     decryptGeneration.current += 1;
@@ -2622,7 +2626,7 @@ function UnlockedVaultPage({
       return null;
     });
     setKnowledgeClientGeneration((current) => current + 1);
-  }, [decryptionSession, editorSessionStore, resetPastedImageFolderRuntime]);
+  }, [decryptionSession, editorSessionStore, memoTabMotion, resetPastedImageFolderRuntime]);
 
   useLayoutEffect(() => {
     const previousOwnerIdKey = previousOwnerIdKeyRef.current;
@@ -6215,6 +6219,7 @@ function UnlockedVaultPage({
     // Closing a tab is an explicit workspace choice. In particular, closing
     // the final tab must not re-arm the first-time Vault auto-open behavior.
     initialEntryAutoOpenPendingRef.current = false;
+    memoTabMotion.prepareClose(tabId);
     setTabs((current) => current.filter((tab) => tab.id !== tabId));
     const groupsPlan = removeWorkspaceTabFromGroups(tabGroups, tabId, activeTabGroupId);
     setTabGroups(groupsPlan.groups);
@@ -11504,7 +11509,7 @@ function UnlockedVaultPage({
                         </select>
                       </label>
                     ) : null}
-                    <div aria-label={`${groupLabel} 열린 탭`} className="vault-tab-strip" onKeyDown={handleRovingTabListKeyDown} role="tablist">
+                    <MemoTabStrip accessGeneration={workspaceAccessScopeGenerationRef.current} activeTabId={group.activeTabId} boundary={memoTabMotion} scope={memoMotionScope} orderKey={JSON.stringify(group.tabIds)} aria-label={`${groupLabel} 열린 탭`} className="vault-tab-strip" onKeyDown={handleRovingTabListKeyDown} role="tablist">
               {groupTabs.map((tab) => (
                 <div className={`${tab.id === group.activeTabId ? "active" : ""}${tab.pinned ? " pinned" : ""}`} key={tab.id} role="presentation">
                   <button
@@ -11536,7 +11541,7 @@ function UnlockedVaultPage({
                   ><X size={13} /></button>
                 </div>
               ))}
-            </div>
+            </MemoTabStrip>
             <div className="vault-tab-actions" role="presentation">
               {groupIsActive ? <button aria-label="새 노트 탭" className="vault-new-tab" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button">+</button> : null}
               {groupIsActive ? <button aria-controls="vault-right-panel" aria-expanded={rightOpen} aria-label={rightOpen ? "오른쪽 패널 닫기" : "오른쪽 패널 열기"} className="vault-right-toggle" onClick={toggleRightPanel} ref={rightPanelToggleRef} type="button"><PanelRight size={17} /></button> : null}
