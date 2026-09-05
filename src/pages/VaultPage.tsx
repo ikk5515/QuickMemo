@@ -55,6 +55,9 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
+import { useVaultDecryptionSession } from "../context/VaultDecryptionContext";
+import type { VaultDecryptionSession } from "../features/vault/vaultDecryptionSession";
+import { preserveAuthorizedVaultDrafts } from "../features/vault/preserveAuthorizedVaultDrafts";
 import { useAuth } from "../context/AuthContext";
 import {
   applyCanvasPathRewritePlan,
@@ -305,6 +308,7 @@ import {
   subscribeDeletedNoteFolders,
   subscribeDeletedNotes,
   subscribeVisibleNotes,
+  reuseUnchangedNoteSnapshots,
   deleteRevisionedNote,
   getVisibleNotesByIdsFromServer,
   loadOwnedVaultCutoverInventory,
@@ -1656,10 +1660,12 @@ function clearVaultPagePreviewTimer(timer: { current: number | null }) {
 }
 
 function UnlockedVaultPage({
+  decryptionSession,
   getIdToken,
   privateKey,
   profile
 }: {
+  decryptionSession: VaultDecryptionSession;
   getIdToken: () => Promise<string>;
   privateKey: CryptoKey;
   profile: UserProfile;
@@ -1763,7 +1769,11 @@ function UnlockedVaultPage({
     setWorkspaceLayout((current) => resizeWorkspaceSplit(current, splitId, ratio));
   }, []);
   const [drafts, setDrafts] = useState<Record<string, DraftState>>({});
+  // Each mutation synchronously writes this ref before setDrafts. A passive
+  // mirror of an older render could overwrite a newer native-editor edit
+  // while its image lease confirmation or encrypted save is awaiting I/O.
   const draftsRef = useRef(drafts);
+  const draftSessionScopeRef = useRef({ uid: profile.uid, privateKey });
   const markdownDraftRevisionRef = useRef(0);
   const [viewMode, setViewMode] = useState<MarkdownViewMode>("live-preview");
   const [pagePreview, setPagePreview] = useState<ActiveVaultPagePreview | null>(null);
@@ -1863,6 +1873,7 @@ function UnlockedVaultPage({
   const trashDecryptGenerationRef = useRef(0);
   const trashFolderDecryptGenerationRef = useRef(0);
   const allVisibleNoteSnapshotsRef = useRef<NoteSnapshot[]>([]);
+  const activeNoteSnapshotsRef = useRef<NoteSnapshot[]>([]);
   const activeFolderSnapshotsRef = useRef<NoteFolderSnapshot[]>([]);
   const allFolderSnapshotsRef = useRef<NoteFolderSnapshot[]>([]);
   const pendingCreatedEntryIdsRef = useRef<Set<string>>(new Set());
@@ -2078,6 +2089,11 @@ function UnlockedVaultPage({
     && vaultNameMigrationStatus === "ready"
     && vaultIntegrityKey !== null
     && vaultServerSubscriptionsReady;
+  const vaultNameWritesReadyRef = useRef(false);
+  useLayoutEffect(() => {
+    vaultNameWritesReadyRef.current = vaultNameWritesReady;
+    return () => { vaultNameWritesReadyRef.current = false; };
+  }, [vaultNameWritesReady]);
   const previousOnlineRef = useRef(isOnline);
   privateKeyAutoLockGuardRef.current = () => Boolean(
     templateApplyBusyRef.current
@@ -2308,6 +2324,7 @@ function UnlockedVaultPage({
 
   const readCurrentServerVaultEntry = useCallback(async (entryId: string) => {
     if (!isOnline) throw new Error("offline");
+    const sessionSignal = decryptionSession.signal;
     const deadline = createVaultApiDeadline(undefined, 8_000);
     try {
       return await deadline.race((async () => {
@@ -2315,7 +2332,10 @@ function UnlockedVaultPage({
         if (!result.resolvedNoteIds.includes(entryId) || result.notes.length !== 1) {
           throw new Error("server-entry-unavailable");
         }
-        const decrypted = await decryptVaultNotes(result.notes, profile.uid, privateKey);
+        const decrypted = await decryptVaultNotes(result.notes, profile.uid, privateKey, {
+          session: decryptionSession,
+          signal: sessionSignal
+        });
         const remote = decrypted.length === 1 ? decrypted[0] : null;
         if (
           !remote
@@ -2330,7 +2350,7 @@ function UnlockedVaultPage({
     } finally {
       deadline.dispose();
     }
-  }, [isOnline, privateKey, profile.uid]);
+  }, [decryptionSession, isOnline, privateKey, profile.uid]);
 
   const prepareDraftMergeConflict = useCallback(async (entryId: string, openResolver: boolean) => {
     const base = draftBaseSnapshotsRef.current.get(entryId);
@@ -2404,6 +2424,7 @@ function UnlockedVaultPage({
     // Authorization changes are a synchronous plaintext boundary. WebCrypto,
     // Firestore callbacks, and worker messages cannot be cancelled reliably,
     // so invalidate every continuation before clearing all note-derived state.
+    decryptionSession.clear();
     decryptGeneration.current += 1;
     workspaceAccessScopeGenerationRef.current += 1;
     workspaceSaveGenerationRef.current += 1;
@@ -2427,6 +2448,7 @@ function UnlockedVaultPage({
     setDecryptedVaultScopeKey(null);
     setVaultDataReady(false);
     allVisibleNoteSnapshotsRef.current = [];
+    activeNoteSnapshotsRef.current = [];
     pendingCreatedEntryIdsRef.current.clear();
     pendingClipboardAssetTitleKeysRef.current.clear();
     pendingClipboardAssetTitleKeyByIdRef.current.clear();
@@ -2445,6 +2467,9 @@ function UnlockedVaultPage({
     folderTrashLockedFolderIdsRef.current.clear();
     notesRef.current = [];
     setDecryptedNotes([]);
+    foldersRef.current = [];
+    folderPathsRef.current = new Map();
+    setFolders([]);
     draftsRef.current = {};
     setDrafts({});
     draftBaseSnapshotsRef.current.clear();
@@ -2525,7 +2550,7 @@ function UnlockedVaultPage({
       return null;
     });
     setKnowledgeClientGeneration((current) => current + 1);
-  }, [resetPastedImageFolderRuntime]);
+  }, [decryptionSession, resetPastedImageFolderRuntime]);
 
   useLayoutEffect(() => {
     const previousOwnerIdKey = previousOwnerIdKeyRef.current;
@@ -2993,6 +3018,7 @@ function UnlockedVaultPage({
     notesRef.current = [];
     foldersRef.current = [];
     allVisibleNoteSnapshotsRef.current = [];
+    activeNoteSnapshotsRef.current = [];
     pendingCreatedEntryIdsRef.current.clear();
     pendingClipboardAssetTitleKeysRef.current.clear();
     pendingClipboardAssetTitleKeyByIdRef.current.clear();
@@ -3098,10 +3124,6 @@ function UnlockedVaultPage({
       void client.dispose();
     };
   }, [knowledgeClientGeneration, privateKey, profile]);
-
-  useEffect(() => {
-    draftsRef.current = drafts;
-  }, [drafts]);
 
   useEffect(() => {
     let active = true;
@@ -3378,6 +3400,7 @@ function UnlockedVaultPage({
     setNoteServerReservationSignature(null);
     if (!privateKey || !profile) {
       allVisibleNoteSnapshotsRef.current = [];
+      activeNoteSnapshotsRef.current = [];
       setRawNotes([]);
       setNoteSnapshotReceived(false);
       return undefined;
@@ -3388,7 +3411,10 @@ function UnlockedVaultPage({
       visibleOwners,
       (nextNotes, metadata) => {
         if (noteSubscriptionGenerationRef.current !== subscriptionGeneration) return;
-        const activeNotes = visibleVaultNotesForFolders(nextNotes, activeFolderSnapshotsRef.current);
+        const activeNotes = reuseUnchangedNoteSnapshots(
+          activeNoteSnapshotsRef.current,
+          visibleVaultNotesForFolders(nextNotes, activeFolderSnapshotsRef.current)
+        );
         for (const note of activeNotes) {
           pendingCreatedEntryIdsRef.current.delete(note.id);
         }
@@ -3399,8 +3425,11 @@ function UnlockedVaultPage({
         noteAccessScopeRef.current = nextAccessScope;
         allVisibleNoteSnapshotsRef.current = nextNotes;
         noteSubscriptionServerReadyRef.current = metadata.serverComplete;
-        setVaultDataReady(false);
-        setRawNotes(activeNotes);
+        if (activeNoteSnapshotsRef.current !== activeNotes) {
+          activeNoteSnapshotsRef.current = activeNotes;
+          setVaultDataReady(false);
+          setRawNotes(activeNotes);
+        }
         setNoteSnapshotReceived(true);
         setNoteServerReservationSignature(metadata.serverComplete && folderSubscriptionServerReadyRef.current
           ? ownedNoteReservationSignature(activeNotes, profile.uid)
@@ -3437,17 +3466,68 @@ function UnlockedVaultPage({
       const folderContentChanged = activeFolderSnapshotsRef.current !== nextFolders;
       activeFolderSnapshotsRef.current = nextFolders;
       folderSubscriptionServerReadyRef.current = metadata.serverComplete;
-      const activeNotes = visibleVaultNotesForFolders(
-        allVisibleNoteSnapshotsRef.current,
-        nextFolders
+      const allVisibleNotes = allVisibleNoteSnapshotsRef.current;
+      const allFolderSnapshots = allFolderSnapshotsRef.current;
+      const noteServerReady = noteSubscriptionServerReadyRef.current;
+      const activeNotes = reuseUnchangedNoteSnapshots(
+        activeNoteSnapshotsRef.current,
+        visibleVaultNotesForFolders(allVisibleNotes, nextFolders)
       );
+      const nextAccessScope = knowledgeAccessScopeSignature(activeNotes, profile.uid);
+      if (knowledgeAccessScopeRequiresReset(noteAccessScopeRef.current, nextAccessScope)) {
+        const preserved = preserveAuthorizedVaultDrafts({
+          previousScope: draftSessionScopeRef.current,
+          currentScope: {
+            uid: profile.uid,
+            privateKey: decryptionSession.matches(profile.uid, privateKey) ? privateKey : null
+          },
+          previousNotes: activeNoteSnapshotsRef.current,
+          nextNotes: activeNotes,
+          drafts: draftsRef.current,
+          baseSnapshots: draftBaseSnapshotsRef.current
+        });
+        const priorActiveTab = latestWorkspaceStateRef.current.activeTab;
+        const preferredEntryId = priorActiveTab?.kind === "entry" && preserved.entryIds.has(priorActiveTab.entryId)
+          ? priorActiveTab.entryId
+          : [...preserved.entryIds][0];
+        // Folder deletion can revoke visible note access before the note
+        // listener changes. Revoke cached keys and pending saves at this same
+        // boundary. Restore only independently authorized dirty buffers;
+        // note plaintext and keys must come from a fresh decrypt afterwards.
+        clearVaultPlaintextForAccessScope();
+        if (preserved.entryIds.size > 0) {
+          draftsRef.current = preserved.drafts;
+          draftBaseSnapshotsRef.current = preserved.baseSnapshots;
+          setDrafts(preserved.drafts);
+          const preservedTabs: WorkspaceTab[] = [...preserved.entryIds].map((entryId) => ({
+            id: workspaceEntryTabId(entryId, "primary"), kind: "entry", entryId,
+            label: preserved.drafts[entryId].title || "암호화 노트"
+          }));
+          const restoredActiveTabId = preservedTabs.find((tab) => tab.kind === "entry" && tab.entryId === preferredEntryId)?.id
+            ?? preservedTabs[0].id;
+          setTabs(preservedTabs);
+          setActiveTabId(restoredActiveTabId);
+          setTabGroups([{ id: "primary", tabIds: preservedTabs.map((tab) => tab.id), activeTabId: restoredActiveTabId }]);
+          setStatus(`폴더 목록이 변경되었습니다. 계속 접근할 수 있는 메모 ${preserved.entryIds.size}개의 편집을 유지했습니다.`);
+        }
+        allVisibleNoteSnapshotsRef.current = allVisibleNotes;
+        activeFolderSnapshotsRef.current = nextFolders;
+        allFolderSnapshotsRef.current = allFolderSnapshots;
+        folderSubscriptionServerReadyRef.current = metadata.serverComplete;
+        noteSubscriptionServerReadyRef.current = noteServerReady;
+        setNoteSnapshotReceived(true);
+      }
+      noteAccessScopeRef.current = nextAccessScope;
       if (folderContentChanged) {
         // vaultPasteLock is an opaque, server-only coordination field. Its
         // acquire/renew/release notifications must not re-run WebCrypto across
         // every note and folder when no user-visible folder data changed.
         setVaultDataReady(false);
         setRawFolders(nextFolders);
-        setRawNotes(activeNotes);
+        if (activeNoteSnapshotsRef.current !== activeNotes) {
+          activeNoteSnapshotsRef.current = activeNotes;
+          setRawNotes(activeNotes);
+        }
       }
       setFolderSnapshotReceived(true);
       setFolderServerReservationSignature(metadata.serverComplete
@@ -3486,7 +3566,7 @@ function UnlockedVaultPage({
         }
       }
     });
-  }, [clearVaultPlaintextForAccessScope, privateKey, profile, vaultIntegrityRetryAttempt]);
+  }, [clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
     if (!privateKey || !profile || !noteSnapshotReceived || !folderSnapshotReceived) {
@@ -3499,12 +3579,17 @@ function UnlockedVaultPage({
     const generation = decryptGeneration.current + 1;
     const decryptScopeKey = plaintextScopeKey;
     decryptGeneration.current = generation;
+    const controller = new AbortController();
     let cancelled = false;
     void Promise.all([
       decryptVaultNotes(rawNotes, profile.uid, privateKey, {
+        session: decryptionSession,
+        signal: controller.signal,
         reusableNotes: notesRef.current
       }),
       decryptVaultFolders(rawFolders, profile.uid, privateKey, {
+        session: decryptionSession,
+        signal: controller.signal,
         reusableFolders: foldersRef.current
       })
     ]).then(([nextNotes, nextFolders]) => {
@@ -3534,11 +3619,12 @@ function UnlockedVaultPage({
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (decryptGeneration.current === generation) {
         decryptGeneration.current += 1;
       }
     };
-  }, [commitFolders, commitNotes, folderSnapshotReceived, noteSnapshotReceived, plaintextScopeKey, privateKey, profile, rawFolders, rawNotes]);
+  }, [commitFolders, commitNotes, decryptionSession, folderSnapshotReceived, noteSnapshotReceived, plaintextScopeKey, privateKey, profile, rawFolders, rawNotes]);
 
   useEffect(() => {
     if (
@@ -5247,7 +5333,8 @@ function UnlockedVaultPage({
             vaultIntegrityKey,
             draft,
             undefined,
-            pastedImageSourceCommit
+            pastedImageSourceCommit,
+            decryptionSession
           );
         } catch (caught) {
           if (ambiguousVaultSaveFailure(caught)) rememberAmbiguousAttempt();
@@ -5320,6 +5407,7 @@ function UnlockedVaultPage({
     beginEntryMutation,
     commitNotes,
     conflictedEntryIds,
+    decryptionSession,
     isOnline,
     privateKey,
     prepareDraftMergeConflict,
@@ -5331,7 +5419,7 @@ function UnlockedVaultPage({
     vaultNameMigrationStatus
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     saveEntryRef.current = saveEntry;
   }, [saveEntry]);
 
@@ -5346,7 +5434,7 @@ function UnlockedVaultPage({
     }
   }, [isOnline, saveEntry, saveFailedEntryIds]);
 
-  async function flushDirtyEntries() {
+  async function flushDirtyEntries(allowDiscard = true) {
     const dirtyEntryIds = Object.entries(draftsRef.current)
       .filter(([, draft]) => draft.dirty)
       .map(([entryId]) => entryId);
@@ -5365,6 +5453,7 @@ function UnlockedVaultPage({
     if (!remaining) {
       return true;
     }
+    if (!allowDiscard) return false;
     return window.confirm(`${remaining}개 항목을 아직 저장하지 못했습니다. 지금 이동하면 현재 세션의 저장되지 않은 편집을 잃을 수 있습니다. 그래도 이동할까요?`);
   }
 
@@ -5499,6 +5588,26 @@ function UnlockedVaultPage({
     }
   }
 
+  async function openWikiInNewTab() {
+    // Open during the click gesture so awaiting the save cannot trigger popup
+    // blocking. Never transfer keys or plaintext between browser tabs.
+    const reader = window.open("about:blank", "_blank");
+    if (!reader) {
+      setError("브라우저에서 새 탭 열기를 허용해주세요. 왼쪽 위키 메뉴로도 읽을 수 있습니다.");
+      return;
+    }
+    reader.opener = null;
+    const destination = activeEntryId ? `/wiki?note=${encodeURIComponent(activeEntryId)}` : "/wiki";
+    try {
+      if (await flushVaultBeforeExit()) {
+        if (!reader.closed) reader.location.replace(destination);
+      } else reader.close();
+    } catch {
+      reader.close();
+      setError("메모 저장을 확인하지 못해 위키 새 탭을 열지 못했습니다.");
+    }
+  }
+
   useEffect(() => {
     const autosave = entryAutosaveRef.current;
     if (!autosave) return;
@@ -5526,7 +5635,8 @@ function UnlockedVaultPage({
     entryId: string,
     patch: Partial<Omit<DraftState, "dirty" | "baseRevision">>
   ) {
-    if (deletingEntryIdsRef.current.has(entryId)) {
+    if (deletingEntryIdsRef.current.has(entryId)
+      || (pathRewriteBusyRef.current && folderTrashLockedFolderIdsRef.current.size > 0)) {
       return;
     }
     entryAutosaveRetryCountsRef.current.delete(entryId);
@@ -6112,10 +6222,12 @@ function UnlockedVaultPage({
 
   async function fetchOwnedServerNotes(noteIds: readonly string[]) {
     if (!isOnline) throw new Error("온라인 연결 후 경로 변경을 다시 시도해주세요.");
+    const sessionSignal = decryptionSession.signal;
     const uniqueIds = Array.from(new Set(noteIds));
     const snapshots: NoteSnapshot[] = [];
     const resolvedIds = new Set<string>();
     for (let offset = 0; offset < uniqueIds.length; offset += 1_000) {
+      sessionSignal.throwIfAborted();
       const result = await getVisibleNotesByIdsFromServer(profile.uid, uniqueIds.slice(offset, offset + 1_000));
       result.notes.forEach((note) => snapshots.push(note));
       result.resolvedNoteIds.forEach((entryId) => resolvedIds.add(entryId));
@@ -6124,6 +6236,8 @@ function UnlockedVaultPage({
       throw new Error("서버에서 모든 경로 갱신 대상을 확인하지 못했습니다.");
     }
     const decrypted = await decryptVaultNotes(snapshots, profile.uid, privateKey, {
+      session: decryptionSession,
+      signal: sessionSignal,
       reusableNotes: notesRef.current
     });
     const owned = decrypted.filter((note) => note.ownerUid === profile.uid);
@@ -6381,7 +6495,10 @@ function UnlockedVaultPage({
         profile.uid,
         privateKey,
         vaultIntegrityKey!,
-        submitted
+        submitted,
+        undefined,
+        undefined,
+        decryptionSession
       );
       if (result.revision !== current.revision + 1) {
         throw new Error("참조 source 저장 revision을 확인하지 못했습니다.");
@@ -7744,7 +7861,9 @@ function UnlockedVaultPage({
               privateKey,
               vaultIntegrityKey,
               rewrittenDraft,
-              pathRewriteActivation
+              pathRewriteActivation,
+              undefined,
+              decryptionSession
             );
         commitRenamedTarget(result, rewrittenDraft, pathMutationPersistedBody);
       });
@@ -8044,6 +8163,12 @@ function UnlockedVaultPage({
     setError(null);
     let ownsPathLock = false;
     try {
+      if ([...pendingClipboardPasteCountsRef.current.values()].some((count) => count > 0)) {
+        throw new Error("이미지 붙여넣기가 끝난 뒤 폴더를 휴지통으로 이동해주세요.");
+      }
+      if (!(await flushDirtyEntries(false))) {
+        throw new Error("저장하지 못한 메모가 있어 폴더를 휴지통으로 이동하지 않았습니다. 공유 메모를 포함한 편집 내용을 먼저 저장해주세요.");
+      }
       await flushOwnedRewriteDrafts();
       if ([...hiddenEntryIds].some(clipboardAssetsPendingForEntry)) {
         throw new Error("하위 노트의 이미지 붙여넣기 상태가 변경되어 폴더 휴지통 처리를 중단했습니다.");
@@ -8058,6 +8183,9 @@ function UnlockedVaultPage({
       pathRewriteBusyRef.current = true;
       ownsPathLock = true;
       setPathRewriteBusy(true);
+      if (Object.values(draftsRef.current).some((draft) => draft.dirty)) {
+        throw new Error("새로 편집한 내용이 있어 폴더 휴지통 처리를 중단했습니다. 편집본은 유지했습니다.");
+      }
       const shareableSourceNoteIds = notesRef.current.flatMap((note) => (
         hiddenEntryIds.has(note.id)
         && note.ownerUid === profile.uid
@@ -8074,6 +8202,9 @@ function UnlockedVaultPage({
           getIdToken,
           sourceNoteIds: shareableSourceNoteIds
         });
+      }
+      if (Object.values(draftsRef.current).some((draft) => draft.dirty)) {
+        throw new Error("새로 편집한 내용이 있어 폴더 휴지통 처리를 중단했습니다. 편집본은 유지했습니다.");
       }
       await trashRevisionedEncryptedFolderSubtree({
         expectedRevision: folder.revision ?? 0,
@@ -8236,7 +8367,10 @@ function UnlockedVaultPage({
           profile.uid,
           privateKey,
           vaultIntegrityKey,
-          draft
+          draft,
+          undefined,
+          undefined,
+          decryptionSession
         );
         expectedRevision = saved.revision;
         const latest = draftsRef.current[entryId] ?? draft;
@@ -9492,8 +9626,12 @@ function UnlockedVaultPage({
   }
 
   async function readComposerEntryFromServer(entryId: string) {
+    const sessionSignal = decryptionSession.signal;
     const encrypted = await getVisibleNotesByIdsFromServer(profile.uid, [entryId]);
-    const [note] = await decryptVaultNotes(encrypted.notes, profile.uid, privateKey);
+    const [note] = await decryptVaultNotes(encrypted.notes, profile.uid, privateKey, {
+      session: decryptionSession,
+      signal: sessionSignal
+    });
     if (!note || note.ownerUid !== profile.uid) return null;
     return { note, snapshot: composerSnapshot(note) };
   }
@@ -9661,7 +9799,10 @@ function UnlockedVaultPage({
           profile.uid,
           privateKey,
           vaultIntegrityKey,
-          submitted
+          submitted,
+          undefined,
+          undefined,
+          decryptionSession
         );
         applyComposerSave(input.entryId, submitted, saved);
         return { revision: saved.revision };
@@ -9781,6 +9922,7 @@ function UnlockedVaultPage({
     { signal }: MarkdownImagePasteContext
   ): Promise<MarkdownImagePasteResult | null> {
     const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
+    const sourceSessionSignal = decryptionSession.signal;
     const accessScopeIsCurrent = () => (
       workspaceAccessScopeGenerationRef.current === accessScopeGeneration
     );
@@ -9839,11 +9981,22 @@ function UnlockedVaultPage({
           requireCurrentAccessScope();
           const minimumRevision = note.revision ?? 0;
           const committed = await pasteModule.commitVaultClipboardSourceWithConfirmation(
-            () => saveEntryRef.current(entryId, {
-              vaultPasteFolderId: destination.folderId,
-              vaultPasteFolderRevision: destination.folderRevision,
-              vaultPasteLockId: destination.lockId
-            }),
+            async () => {
+              await pasteModule.waitForVaultClipboardSourceReadiness({
+                assertCurrent: () => {
+                  requireCurrentAccessScope();
+                  decryptionSession.assertSession(profile.uid, privateKey);
+                },
+                isReady: () => vaultNameWritesReadyRef.current,
+                sessionSignal: sourceSessionSignal,
+                signal
+              });
+              await saveEntryRef.current(entryId, {
+                vaultPasteFolderId: destination.folderId,
+                vaultPasteFolderRevision: destination.folderRevision,
+                vaultPasteLockId: destination.lockId
+              });
+            },
             () => notesRef.current.some((candidate) => (
               candidate.id === entryId
               && candidate.ownerUid === profile.uid
@@ -9950,6 +10103,7 @@ function UnlockedVaultPage({
   }
 
   async function createConvertedMarkdownCopy(draft: VaultMarkdownCopyDraft) {
+    const sessionSignal = decryptionSession.signal;
     const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
     const assertCurrent = () => {
       if (workspaceAccessScopeGenerationRef.current !== accessScopeGeneration) {
@@ -9962,7 +10116,10 @@ function UnlockedVaultPage({
     const formatConverter = await import("../features/vault/core/formatConverter");
     assertCurrent();
     const encrypted = await getVisibleNotesByIdsFromServer(profile.uid, [draft.sourceEntryId]);
-    const [latest] = await decryptVaultNotes(encrypted.notes, profile.uid, privateKey);
+    const [latest] = await decryptVaultNotes(encrypted.notes, profile.uid, privateKey, {
+      session: decryptionSession,
+      signal: sessionSignal
+    });
     assertCurrent();
     if (!latest || latest.contentFormat !== "legacy-html-v1") {
       throw new Error("변환할 HTML 원본을 서버에서 다시 확인하지 못했습니다.");
@@ -10324,7 +10481,10 @@ function UnlockedVaultPage({
         profile.uid,
         privateKey,
         vaultIntegrityKey,
-        submitted
+        submitted,
+        undefined,
+        undefined,
+        decryptionSession
       );
       if (
         result.revision !== (remote.revision ?? 0)
@@ -10779,6 +10939,7 @@ function UnlockedVaultPage({
           <button aria-label="검색" aria-pressed={leftOpen && leftMode === "search"} onClick={() => showLeftPanel("search")} type="button"><Search aria-hidden="true" size={19} /><span>검색</span></button>
           <button aria-label="북마크와 워크스페이스" aria-pressed={leftOpen && leftMode === "bookmarks"} onClick={() => showLeftPanel("bookmarks")} type="button"><Bookmark aria-hidden="true" size={19} /><span>북마크</span></button>
           <span className="vault-ribbon-spacer" />
+          <button aria-label="위키" onClick={() => void navigateAfterSaving(activeEntryId ? `/wiki?note=${encodeURIComponent(activeEntryId)}` : "/wiki")} type="button"><BookOpen aria-hidden="true" size={19} /><span>위키</span></button>
           <button aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} type="button"><LibraryBig aria-hidden="true" size={19} /><span>자료실</span></button>
           <button aria-label="일정" onClick={() => void navigateAfterSaving("/schedule")} type="button"><CalendarDays aria-hidden="true" size={19} /><span>일정</span></button>
           <button aria-label="명령 팔레트" onClick={() => setCommandPaletteOpen(true)} title="명령 팔레트 (Cmd/Ctrl+P)" type="button"><CommandIcon aria-hidden="true" size={19} /><span>명령</span></button>
@@ -10956,6 +11117,7 @@ function UnlockedVaultPage({
             <details className="vault-more-tools">
               <summary><Settings2 aria-hidden="true" size={16} /><span>더 보기</span><ChevronDown aria-hidden="true" size={14} /></summary>
               <div className="vault-more-tools-content">
+                <button aria-label="위키 새 탭에서 읽기" onClick={() => void openWikiInNewTab()} type="button"><BookOpen aria-hidden="true" size={16} />위키 새 탭에서 읽기</button>
                 <button aria-label="태그" onClick={() => showLeftPanel("tags")} type="button"><Tags aria-hidden="true" size={16} />태그 모아 보기</button>
                 <button aria-label="그래프 보기" onClick={openGlobalGraph} type="button"><Network aria-hidden="true" size={16} />메모 연결 보기</button>
                 <button aria-label="Obsidian ZIP 가져오기" disabled={!vaultNameWritesReady || vaultImportBusy || pathRewriteBusy || entryCreationContentLocked} onClick={selectVaultImportFile} type="button"><Upload aria-hidden="true" size={16} />파일 가져오기</button>
@@ -11928,6 +12090,7 @@ function UnlockedVaultPage({
  */
 export default function VaultPage() {
   const { firebaseUser, privateKey, profile } = useAuth();
+  const decryptionSession = useVaultDecryptionSession();
   const profileUid = profile?.uid;
   const getIdToken = useCallback(async () => {
     if (!firebaseUser || !profileUid || firebaseUser.uid !== profileUid) {
@@ -11942,7 +12105,10 @@ export default function VaultPage() {
   if (!privateKey) {
     return <AppShell variant="vault"><UnlockPanel /></AppShell>;
   }
-  return <UnlockedVaultPage getIdToken={getIdToken} privateKey={privateKey} profile={profile} />;
+  if (!decryptionSession) {
+    return <AppShell variant="vault"><div className="page-center" role="status">메모를 준비하는 중…</div></AppShell>;
+  }
+  return <UnlockedVaultPage decryptionSession={decryptionSession} getIdToken={getIdToken} privateKey={privateKey} profile={profile} />;
 }
 
 interface VaultTagTreeNode {

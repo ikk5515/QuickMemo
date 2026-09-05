@@ -1,5 +1,6 @@
 import { decryptText, encryptText, generateNoteKey, unwrapNoteKey, wrapNoteKey } from "../../lib/crypto";
 import { mapWithConcurrency } from "../../lib/mapWithConcurrency";
+import { VaultDecryptionSession, vaultNoteDecryptionAuthority } from "./vaultDecryptionSession";
 import {
   createEncryptedNoteFolder,
   createEncryptedNoteFolderAtId,
@@ -29,6 +30,9 @@ export interface DecryptedVaultNote extends DecryptedNote {
 }
 
 export interface DecryptVaultNotesOptions {
+  /** Explicit cache shared only inside the same unlocked account session. */
+  session?: VaultDecryptionSession | null;
+  signal?: AbortSignal;
   /**
    * Already-decrypted subscription rows from the same unlocked session. Their
    * plaintext is reused only when the backend snapshot has the exact revision,
@@ -38,6 +42,8 @@ export interface DecryptVaultNotesOptions {
 }
 
 export interface DecryptVaultFoldersOptions {
+  session?: VaultDecryptionSession | null;
+  signal?: AbortSignal;
   /** Reuses only plaintext proven to match the exact encrypted folder name and wrapped key. */
   reusableFolders?: readonly DecryptedVaultFolder[];
 }
@@ -109,6 +115,11 @@ function wrappedKeyMatches(
     && left?.wrappedKey === right?.wrappedKey;
 }
 
+function isDecryptionAbort(error: unknown) {
+  // DOMException is not an Error subclass in every WebCrypto/runtime realm.
+  return Boolean(error && typeof error === "object" && "name" in error && error.name === "AbortError");
+}
+
 function reusableDecryptedNoteMatches(
   note: NoteSnapshot,
   reusable: DecryptedVaultNote,
@@ -116,6 +127,7 @@ function reusableDecryptedNoteMatches(
 ) {
   return note.id === reusable.id
     && note.ownerUid === reusable.ownerUid
+    && vaultNoteDecryptionAuthority(note, uid) === vaultNoteDecryptionAuthority(reusable, uid)
     && note.revision === reusable.revision
     // Require explicit raw identity equality. A resolved legacy fallback must
     // still be decrypted from the authoritative backend payload.
@@ -132,8 +144,16 @@ export async function decryptVaultNotes(
   privateKey: CryptoKey,
   options: DecryptVaultNotesOptions = {}
 ) {
-  const reusableById = new Map(options.reusableNotes?.map((note) => [note.id, note]) ?? []);
+  const { signal, session } = options;
+  signal?.throwIfAborted();
+  session?.assertSession(uid, privateKey);
+  const sessionSignal = session?.signal;
+  // External plaintext cannot prove which private-key session produced it.
+  const reusableById = new Map(!session ? options.reusableNotes?.map((note) => [note.id, note]) ?? [] : []);
   const decrypted = await mapWithConcurrency(notes, 4, async (note): Promise<DecryptedVaultNote | null> => {
+    signal?.throwIfAborted();
+    sessionSignal?.throwIfAborted();
+    if (!session && !vaultNoteDecryptionAuthority(note, uid)) return null;
     const reusable = reusableById.get(note.id);
     if (reusable && reusableDecryptedNoteMatches(note, reusable, uid)) {
       // Keep every authoritative metadata/ciphertext field from the server and
@@ -147,16 +167,25 @@ export async function decryptVaultNotes(
       };
     }
     const wrappedKey = note.wrappedKeys[uid];
-    if (!wrappedKey) {
+    if (!wrappedKey && !session) {
       return null;
     }
 
     try {
-      const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
-      const [title, body] = await Promise.all([
-        decryptText(note.encryptedTitle, noteKey),
-        decryptText(note.encryptedBody, noteKey)
-      ]);
+      let title: string;
+      let body: string;
+      if (session) {
+        ({ title, body } = await session.decryptNote(note, signal));
+      } else {
+        const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+        signal?.throwIfAborted();
+        [title, body] = await Promise.all([
+          decryptText(note.encryptedTitle, noteKey),
+          decryptText(note.encryptedBody, noteKey)
+        ]);
+      }
+      signal?.throwIfAborted();
+      sessionSignal?.throwIfAborted();
 
       return {
         ...note,
@@ -165,10 +194,15 @@ export async function decryptVaultNotes(
         title,
         body
       };
-    } catch {
+    } catch (error) {
+      signal?.throwIfAborted();
+      sessionSignal?.throwIfAborted();
+      if (isDecryptionAbort(error)) throw error;
       return null;
     }
   });
+  signal?.throwIfAborted();
+  sessionSignal?.throwIfAborted();
 
   return decrypted.filter((note): note is DecryptedVaultNote => note !== null);
 }
@@ -197,10 +231,16 @@ export async function decryptVaultFolders(
   // another owner's legacy plaintext name into the decrypted result pipeline.
   // Bound crypto concurrency as a large Vault otherwise creates a CPU/memory
   // spike while unlocking.
+  const { signal, session } = options;
+  signal?.throwIfAborted();
+  session?.assertSession(uid, privateKey);
+  const sessionSignal = session?.signal;
   const ownedFolders = folders.filter((folder) => folder.ownerUid === uid);
-  const reusableById = new Map(options.reusableFolders?.map((folder) => [folder.id, folder]) ?? []);
-  return mapWithConcurrency(ownedFolders, 4, async (folder): Promise<DecryptedVaultFolder> => {
-    if (!folder.encryptedName || !folder.wrappedKey) {
+  const reusableById = new Map(!session ? options.reusableFolders?.map((folder) => [folder.id, folder]) ?? [] : []);
+  const result = await mapWithConcurrency(ownedFolders, 4, async (folder): Promise<DecryptedVaultFolder> => {
+    signal?.throwIfAborted();
+    sessionSignal?.throwIfAborted();
+    if (!folder.encryptedName && !folder.wrappedKey) {
       return { ...folder, displayName: folder.name };
     }
     const reusable = reusableById.get(folder.id);
@@ -209,12 +249,28 @@ export async function decryptVaultFolders(
     }
 
     try {
-      const folderKey = await unwrapNoteKey(folder.wrappedKey, privateKey);
-      return { ...folder, displayName: await decryptText(folder.encryptedName, folderKey) };
-    } catch {
+      let displayName: string;
+      if (session) {
+        displayName = await session.decryptFolder(folder, signal);
+      } else {
+        if (!folder.wrappedKey || !folder.encryptedName) throw new Error("Incomplete encrypted folder");
+        const folderKey = await unwrapNoteKey(folder.wrappedKey, privateKey);
+        signal?.throwIfAborted();
+        displayName = await decryptText(folder.encryptedName, folderKey);
+      }
+      signal?.throwIfAborted();
+      sessionSignal?.throwIfAborted();
+      return { ...folder, displayName };
+    } catch (error) {
+      signal?.throwIfAborted();
+      sessionSignal?.throwIfAborted();
+      if (isDecryptionAbort(error)) throw error;
       return { ...folder, displayName: "복호화할 수 없는 폴더", nameDecryptionFailed: true };
     }
   });
+  signal?.throwIfAborted();
+  sessionSignal?.throwIfAborted();
+  return result;
 }
 
 export async function createEncryptedVaultFolder(

@@ -11,6 +11,7 @@ import {
 import { PropsWithChildren, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { auth, authPersistenceReady } from "../lib/firebase";
 import { relockUserPrivateKey, unlockPrivateKeyWithFallback } from "../lib/crypto";
+import { clearUnlockedSessionResources } from "../lib/unlockedSessionResources";
 import { clearAuthSession, readAuthSession, startAuthSession } from "../lib/authSession";
 import { shouldDelayPrivateKeyAutoLock } from "../lib/privateKeyAutoLockGuard";
 import {
@@ -102,6 +103,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
   }, []);
 
   const clearPrivateKey = useCallback(() => {
+    clearUnlockedSessionResources();
     privateKeyUidRef.current = null;
     setPrivateKeyUid(null);
     setPrivateKey(null);

@@ -55,6 +55,26 @@ export interface BuildGraphSnapshotOptions {
   allowRegex?: boolean;
 }
 
+/** Only projection settings belong in the worker cache; forces are Canvas state. */
+export function graphSnapshotCacheKey(settings: GraphViewSettings, activeEntryId?: string): string {
+  const { common } = settings;
+  return JSON.stringify([
+    settings.scope,
+    common.query,
+    common.showTags,
+    common.showAttachments,
+    common.existingFilesOnly,
+    common.groups.slice(0, MAX_GRAPH_GROUPS_PER_SNAPSHOT).map((group) => [group.id, group.query, group.color, group.order]),
+    settings.scope === "global" ? settings.showOrphans : [
+      settings.root === "follow-active" ? activeEntryId ?? null : settings.root.entryId,
+      settings.depth,
+      settings.incoming,
+      settings.outgoing,
+      settings.neighborLinks
+    ]
+  ]);
+}
+
 interface CollapsedLink {
   order: number;
   sourceEntryId: string;

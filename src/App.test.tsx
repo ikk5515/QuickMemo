@@ -50,6 +50,7 @@ vi.mock("./pages/RecurringPage", async () => {
 });
 vi.mock("./pages/SchedulePage", () => ({ default: () => <span>일정 화면</span> }));
 vi.mock("./pages/VaultPage", () => ({ default: () => <span>Vault 화면</span> }));
+vi.mock("./pages/WikiPage", () => ({ default: () => <span>위키 화면</span> }));
 
 function profile(overrides: Partial<UserProfile> = {}): UserProfile {
   return {
@@ -215,6 +216,7 @@ describe("RequireAuth feature access", () => {
   it.each([
     ["/app", { notes: true, library: false, schedule: false }, import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true" ? "Vault 화면" : "노트 화면"],
     ["/app/legacy", { notes: true, library: false, schedule: false }, "노트 화면"],
+    ["/wiki?note=owned-note", { notes: true, library: false, schedule: false }, "위키 화면"],
     ["/library", { notes: false, library: true, schedule: false }, "자료실 화면"],
     ["/schedule", { notes: false, library: false, schedule: true }, "일정 화면"],
     ["/schedule/recurring", { notes: false, library: false, schedule: true }, "일정 화면"]

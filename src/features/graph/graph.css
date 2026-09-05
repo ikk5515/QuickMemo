@@ -1,10 +1,17 @@
+.qm-graph-view,
+.qm-graph-canvas,
+.qm-graph-settings {
+  --qm-graph-accent: var(--color-primary, var(--accent, #8b82f6));
+  --qm-graph-bg: var(--color-surface, var(--background-primary, #17161e));
+  --qm-graph-panel: var(--color-surface, var(--background-secondary, #23212d));
+  --qm-graph-button: var(--color-surface-muted, var(--interactive-normal, #373442));
+  --qm-graph-border: var(--color-border-subtle, var(--background-modifier-border, #393645));
+  --qm-graph-muted: var(--color-text-muted, var(--text-muted, #aaa5b7));
+  --qm-graph-text: var(--color-text-primary, var(--text-normal, #eceaf2));
+  --qm-graph-node: var(--color-text-secondary, var(--text-muted, #aaa5b7));
+}
+
 .qm-graph-view {
-  --qm-graph-accent: var(--accent, #8b82f6);
-  --qm-graph-bg: var(--background-primary, #17161e);
-  --qm-graph-panel: color-mix(in srgb, var(--background-secondary, #23212d) 94%, transparent);
-  --qm-graph-border: var(--background-modifier-border, #393645);
-  --qm-graph-muted: var(--text-muted, #aaa5b7);
-  --qm-graph-text: var(--text-normal, #eceaf2);
   background: var(--qm-graph-bg);
   color: var(--qm-graph-text);
   height: 100%;
@@ -108,7 +115,7 @@
 }
 
 .qm-graph-field input {
-  background: var(--background-primary, #17161e);
+  background: var(--qm-graph-bg);
   border: 1px solid var(--qm-graph-border, #393645);
   border-radius: 0.35rem;
   color: inherit;
@@ -148,7 +155,7 @@
 .qm-graph-button,
 .qm-graph-group button,
 .qm-graph-toolbar button {
-  background: var(--interactive-normal, #373442);
+  background: var(--qm-graph-button);
   border: 1px solid var(--qm-graph-border, #494555);
   border-radius: 0.35rem;
   color: inherit;
@@ -187,7 +194,7 @@
 }
 
 .qm-graph-group > input[type="text"] {
-  background: var(--background-primary, #17161e);
+  background: var(--qm-graph-bg);
   border: 1px solid var(--qm-graph-border, #393645);
   border-radius: 0.35rem;
   color: inherit;
@@ -228,9 +235,7 @@
 }
 
 .qm-graph-canvas {
-  background:
-    radial-gradient(circle at center, color-mix(in srgb, var(--qm-graph-accent, #8b82f6) 8%, transparent), transparent 50%),
-    var(--qm-graph-bg, #17161e);
+  background: var(--qm-graph-bg, #17161e);
   color: var(--qm-graph-text, #eceaf2);
   height: 100%;
   min-height: 0;
@@ -396,7 +401,7 @@
 }
 
 .qm-graph-accessible-more {
-  background: var(--interactive-normal, #373442);
+  background: var(--qm-graph-button);
   border: 1px solid var(--qm-graph-border, #494555);
   border-radius: 0.35rem;
   color: inherit;

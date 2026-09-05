@@ -1,5 +1,6 @@
 import {
   CalendarDays,
+  BookOpen,
   Files,
   KeyRound,
   LibraryBig,
@@ -57,7 +58,7 @@ import type {
 import { AppSelect } from "./AppSelect";
 
 type WorkspacePanelIntent = "files" | "search";
-type WorkspaceSection = "files" | "library" | "schedule" | "admin";
+type WorkspaceSection = "files" | "library" | "schedule" | "admin" | "wiki";
 
 interface WorkspaceNavigationItem {
   href: string;
@@ -73,6 +74,7 @@ function workspaceSectionFromLocation(pathname: string): WorkspaceSection | null
   if (pathname === "/library") {
     return "library";
   }
+  if (pathname === "/wiki") return "wiki";
   if (pathname.startsWith("/schedule")) {
     return "schedule";
   }
@@ -126,6 +128,7 @@ export function AppShell({
 
   if (featureAccess.notes) {
     navigationItems.push({ href: "/app?panel=files", icon: Files, label: "메모", section: "files" });
+    navigationItems.push({ href: "/wiki", icon: BookOpen, label: "위키", section: "wiki" });
   }
   if (featureAccess.schedule) {
     navigationItems.push({ href: "/schedule", icon: CalendarDays, label: "일정", section: "schedule" });

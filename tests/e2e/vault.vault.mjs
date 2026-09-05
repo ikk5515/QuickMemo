@@ -258,6 +258,9 @@ test("authenticated encrypted Vault works across the supported responsive widths
   await expect(liveEditor).toBeVisible();
   await expect(liveEditor.locator(".cm-editor")).toHaveCount(1);
   await expect(page.locator(".vault-note-content > .vault-markdown-renderer")).toHaveCount(0);
+  // Mode switches preserve the caret. Activate this line before checking its
+  // raw Markdown syntax; inactive headings intentionally hide the # marker.
+  await liveEditor.locator(".cm-line").first().click();
   await expect(liveEditor.locator(".cm-line").first()).toContainText("# E2E Markdown");
   await expect(liveEditor.locator(".cm-live-wikilink")).toContainText("연결 대상");
   await expect(liveEditor.locator(".cm-live-tag")).toContainText("#vault/e2e");

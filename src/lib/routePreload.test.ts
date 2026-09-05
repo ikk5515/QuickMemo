@@ -43,6 +43,7 @@ describe("route code preloading", () => {
     expect(resolveProtectedRoutePreloadKey("/home", activeProfile)).toBe("home");
     expect(resolveProtectedRoutePreloadKey("/app?panel=files", activeProfile)).toBe("notes");
     expect(resolveProtectedRoutePreloadKey("/app/legacy", activeProfile)).toBe("legacyNotes");
+    expect(resolveProtectedRoutePreloadKey("/wiki?note=opaque-id", activeProfile)).toBe("wiki");
     expect(resolveProtectedRoutePreloadKey("/library#capture=safe", activeProfile)).toBe("library");
     expect(resolveProtectedRoutePreloadKey("/schedule?view=matrix", activeProfile)).toBe("schedule");
     expect(resolveProtectedRoutePreloadKey("/schedule/recurring", activeProfile)).toBe("recurring");
@@ -54,6 +55,7 @@ describe("route code preloading", () => {
     });
 
     expect(resolveProtectedRoutePreloadKey("/app", scheduleOnly)).toBeNull();
+    expect(resolveProtectedRoutePreloadKey("/wiki", scheduleOnly)).toBeNull();
     expect(resolveProtectedRoutePreloadKey("/library", scheduleOnly)).toBeNull();
     expect(resolveProtectedRoutePreloadKey("/admin", scheduleOnly)).toBeNull();
     expect(resolveProtectedRoutePreloadKey("/share/share-id", scheduleOnly)).toBeNull();

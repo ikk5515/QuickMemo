@@ -11,6 +11,7 @@ import {
   saveEncryptedVaultEntry
 } from "./vaultPersistence";
 import { resolveVaultEntryNameCollision } from "./vaultEntryCollisionRecovery";
+import { VaultDecryptionSession } from "./vaultDecryptionSession";
 
 const mocks = vi.hoisted(() => ({
   backfillRevisionedVaultNameClaim: vi.fn(),
@@ -95,6 +96,12 @@ function markdownNote(overrides: Partial<DecryptedVaultNote> = {}): DecryptedVau
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 describe("vaultPersistence encrypted revision contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -140,6 +147,34 @@ describe("vaultPersistence encrypted revision contract", () => {
     const persisted = mocks.createRevisionedEncryptedNote.mock.calls[0][0];
     expect(JSON.stringify(persisted)).not.toContain(body);
     expect(JSON.stringify(persisted)).not.toContain("원본 노트");
+  });
+
+  it("starts independent name fingerprint and key generation together but encrypts only after both succeed", async () => {
+    const fingerprint = deferred<string>();
+    const generatedKey = deferred<CryptoKey>();
+    mocks.fingerprint.mockReturnValue(fingerprint.promise);
+    mocks.generateNoteKey.mockReturnValue(generatedKey.promise);
+
+    const creating = createMarkdownVaultNote(profile, vaultIntegrityKey, {
+      body: "# 새 메모", folderId: null, title: "새 메모"
+    });
+    await vi.waitFor(() => {
+      expect(mocks.fingerprint).toHaveBeenCalledOnce();
+      expect(mocks.generateNoteKey).toHaveBeenCalledOnce();
+    });
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+    expect(mocks.createRevisionedEncryptedNote).not.toHaveBeenCalled();
+
+    generatedKey.resolve(noteKey);
+    await generatedKey.promise;
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+    fingerprint.resolve(changedVaultClaimId);
+    expect(await creating).toMatchObject({ noteId: "created", revision: 1 });
+    expect(mocks.encryptText).toHaveBeenCalledTimes(4);
+    expect(mocks.createRevisionedEncryptedNote).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      nameClaim: expect.objectContaining({ claimId: changedVaultClaimId }),
+      wrappedKeys: { "user-a": wrappedKey }
+    }));
   });
 
   it.each(["bad/name", "bad\\name", "bad%2Fname", "bad%252Fname", "bad\u0000name"])(
@@ -264,6 +299,76 @@ describe("vaultPersistence encrypted revision contract", () => {
       uid: "user-a"
     }));
     expect(JSON.stringify(mocks.updateRevisionedEncryptedNote.mock.calls[0][0])).not.toContain(body);
+  });
+
+  it("saves with the unlocked session key without repeating RSA unwrap or encrypting an unchanged title", async () => {
+    const session = new VaultDecryptionSession(profile.uid, privateKey);
+    const note = markdownNote();
+    await session.getNoteKey(note, profile.uid, privateKey);
+    const draft = { title: note.title, body: "# 세션 키로 변경", folderId: null };
+    await saveEncryptedVaultEntry(note, profile.uid, privateKey, vaultIntegrityKey, draft, undefined, undefined, session);
+
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledExactlyOnceWith(wrappedKey, privateKey);
+    expect(mocks.encryptText).toHaveBeenCalledTimes(3);
+    expect(mocks.encryptText).not.toHaveBeenCalledWith(note.title, noteKey);
+    expect(mocks.updateRevisionedEncryptedNote).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      expectedRevision: 7,
+      encryptedTitle: note.encryptedTitle,
+      changedFields: ["body"],
+      readerUids: [profile.uid],
+      uid: profile.uid
+    }));
+  });
+
+  it.each(["clear", "dispose"] as const)("never starts a server write when session %s occurs during encryption", async (action) => {
+    const session = new VaultDecryptionSession(profile.uid, privateKey);
+    const note = markdownNote();
+    await session.getNoteKey(note, profile.uid, privateKey);
+    const encrypted = deferred<typeof encryptedPayload>();
+    mocks.encryptText.mockReturnValue(encrypted.promise);
+    const saving = saveEncryptedVaultEntry(note, profile.uid, privateKey, vaultIntegrityKey, {
+      title: note.title, body: "# 잠금 직전 변경", folderId: null
+    }, undefined, undefined, session);
+    const cancelled = expect(saving).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(mocks.encryptText).toHaveBeenCalledTimes(3));
+
+    session[action]();
+    encrypted.resolve(encryptedPayload);
+    await cancelled;
+    expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedEncryptedNoteAndFolder).not.toHaveBeenCalled();
+    expect(session.stats.entries).toBe(0);
+  });
+
+  it("stops after session clear during a pending name fingerprint before starting unwrap or encryption", async () => {
+    const session = new VaultDecryptionSession(profile.uid, privateKey);
+    const fingerprint = deferred<string>();
+    mocks.fingerprint.mockReturnValue(fingerprint.promise);
+    const saving = saveEncryptedVaultEntry(markdownNote(), profile.uid, privateKey, vaultIntegrityKey, {
+      title: "변경 제목", body: "# 변경", folderId: null
+    }, undefined, undefined, session);
+    const cancelled = expect(saving).rejects.toMatchObject({ name: "AbortError" });
+    session.clear();
+    fingerprint.resolve(changedVaultClaimId);
+    await cancelled;
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it.each(["other UID", "other private key", "disposed"])("rejects a save with an %s session before cryptography or persistence", async (reason) => {
+    const session = new VaultDecryptionSession(
+      reason === "other UID" ? "user-b" : profile.uid,
+      reason === "other private key" ? {} as CryptoKey : privateKey
+    );
+    if (reason === "disposed") session.dispose();
+    await expect(saveEncryptedVaultEntry(markdownNote(), profile.uid, privateKey, vaultIntegrityKey, {
+      title: "변경 제목", body: "# 변경", folderId: null
+    }, undefined, undefined, session)).rejects.toMatchObject({ name: "AbortError" });
+    expect(mocks.fingerprint).not.toHaveBeenCalled();
+    expect(mocks.unwrapNoteKey).not.toHaveBeenCalled();
+    expect(mocks.encryptText).not.toHaveBeenCalled();
+    expect(mocks.updateRevisionedEncryptedNote).not.toHaveBeenCalled();
   });
 
   it("does not re-encrypt unchanged fields and records the exact changed field", async () => {

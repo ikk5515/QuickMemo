@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import * as graphModule from "./graph";
 import {
   DEFAULT_GLOBAL_GRAPH_SETTINGS,
   DEFAULT_LOCAL_GRAPH_SETTINGS
@@ -78,6 +79,63 @@ class ThrowingMutationTransport extends RuntimeTransport {
 }
 
 describe("knowledge worker runtime", () => {
+  it("reuses global and local projections for display changes and invalidates them on data changes", () => {
+    const buildSnapshot = vi.spyOn(graphModule, "buildGraphSnapshot");
+    try {
+      const responses: KnowledgeWorkerResponse[] = [];
+      const runtime = createKnowledgeWorkerRuntime({ postMessage: (response) => responses.push(structuredClone(response)) });
+      runtime.handleRequest({ id: "replace", type: "replace-vault", entries: [
+        markdownEntry("a", "A.md", "[[B]]"), markdownEntry("b", "B.md", "")
+      ] });
+      const global = { id: "global", type: "graph-snapshot" as const, settings: DEFAULT_GLOBAL_GRAPH_SETTINGS };
+      const local = { id: "local", type: "graph-snapshot" as const, settings: DEFAULT_LOCAL_GRAPH_SETTINGS, activeEntryId: "a" };
+      runtime.handleRequest(global);
+      runtime.handleRequest(local);
+      expect(buildSnapshot).toHaveBeenCalledTimes(2);
+
+      runtime.handleRequest({ ...global, activeEntryId: "b", settings: {
+        ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+        animate: true,
+        common: { ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common, nodeSize: 2, repelForce: 15, arrows: true }
+      } });
+      runtime.handleRequest(local);
+      expect(buildSnapshot).toHaveBeenCalledTimes(2);
+
+      runtime.handleRequest({ ...local, activeEntryId: "b" });
+      expect(buildSnapshot).toHaveBeenCalledTimes(3);
+      runtime.handleRequest({ ...global, settings: {
+        ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+        common: { ...DEFAULT_GLOBAL_GRAPH_SETTINGS.common, query: "file:A" }
+      } });
+      expect(buildSnapshot).toHaveBeenCalledTimes(4);
+
+      runtime.handleRequest({ id: "rename", type: "upsert-entry", entry: markdownEntry("a", "Renamed.md", "[[B]]") });
+      runtime.handleRequest(global);
+      runtime.handleRequest(local);
+      expect(buildSnapshot).toHaveBeenCalledTimes(6);
+
+      runtime.handleRequest({ id: "remove", type: "remove-entry", entryId: "b" });
+      runtime.handleRequest(global);
+      const removed = responses.at(-1);
+      expect(removed?.type === "graph-snapshot" && removed.snapshot.nodes.some((node) => node.entryId === "b")).toBe(false);
+      expect(buildSnapshot).toHaveBeenCalledTimes(7);
+
+      // Replacing a vault/allowed-entry set cannot reuse the previous user's
+      // decrypted projection, even when the filter and active id are unchanged.
+      runtime.handleRequest({ id: "new-scope", type: "replace-vault", entries: [] });
+      runtime.handleRequest(global);
+      expect(responses.at(-1)).toMatchObject({ type: "graph-snapshot", snapshot: { nodes: [], edges: [] } });
+      expect(buildSnapshot).toHaveBeenCalledTimes(8);
+      runtime.handleRequest({ id: "dispose", type: "dispose" });
+      const responseCount = responses.length;
+      runtime.handleRequest(global);
+      expect(responses).toHaveLength(responseCount);
+      expect(buildSnapshot).toHaveBeenCalledTimes(8);
+    } finally {
+      buildSnapshot.mockRestore();
+    }
+  });
+
   it("supports replace, upsert, remove, search, links, tags, metadata and graph snapshots", () => {
     const responses: KnowledgeWorkerResponse[] = [];
     const runtime = createKnowledgeWorkerRuntime({

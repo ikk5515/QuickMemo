@@ -312,6 +312,22 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     }).toBe(persistedSource);
   });
 
+  await test.step("read saved images in the private wiki after an independent unlock", async () => {
+    const beforeReading = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
+    await navigateWithinApp(page, `/wiki?note=${entryId}`);
+    await page.reload();
+    await unlockEncryptedVault(page, fixture.viewerAuth.password);
+    await expect(page.locator(".wiki-title")).toHaveText(noteTitle);
+    for (const imageTitle of imageTitles) {
+      const image = page.locator(".wiki-body").getByRole("img", { name: imageTitle, exact: true });
+      await image.scrollIntoViewIfNeeded();
+      await expect(image).toBeVisible();
+      await expect.poll(() => image.evaluate((element) => element.complete && element.naturalWidth > 0)).toBe(true);
+    }
+    await expect(page.getByRole("textbox", { name: "Markdown 편집기" })).toHaveCount(0);
+    expect(await ownedVaultNotesState(request, fixture.viewerAuth.uid)).toEqual(beforeReading);
+  });
+
   if (browserName === "webkit") {
     allowExpectedWebKitFirestoreEmulatorUnloadErrors(diagnostics);
   }

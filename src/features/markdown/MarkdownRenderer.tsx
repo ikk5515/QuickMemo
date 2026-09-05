@@ -43,6 +43,7 @@ export interface MarkdownRendererProps
   onTagClick?: MarkdownTagClickHandler;
   renderCodeBlock?: (language: string, source: string) => ReactNode | undefined;
   renderEmbed?: (reference: MarkdownLinkReference) => ReactNode;
+  maxCustomEmbeds?: number;
 }
 
 interface InlineRenderOptions {
@@ -51,6 +52,8 @@ interface InlineRenderOptions {
   onTagClick?: MarkdownTagClickHandler;
   renderCodeBlock?: (language: string, source: string) => ReactNode | undefined;
   renderEmbed?: (reference: MarkdownLinkReference) => ReactNode;
+  maxCustomEmbeds: number;
+  customEmbedsRendered: number;
   footnotePrefix: string;
   dataviewBlocksRendered: number;
 }
@@ -64,6 +67,7 @@ export function MarkdownRenderer({
   onTagClick,
   renderCodeBlock,
   renderEmbed,
+  maxCustomEmbeds = Number.POSITIVE_INFINITY,
   ...attributes
 }: MarkdownRendererProps) {
   const reactId = useId();
@@ -80,6 +84,8 @@ export function MarkdownRenderer({
     onTagClick,
     renderCodeBlock,
     renderEmbed,
+    maxCustomEmbeds: Math.max(0, maxCustomEmbeds),
+    customEmbedsRendered: 0,
     footnotePrefix: `qm-markdown-${reactId.replace(/[^a-z0-9_-]/giu, "")}`,
     dataviewBlocksRendered: 0
   };
@@ -452,7 +458,8 @@ function renderEmbed(
   key: string,
   options: InlineRenderOptions
 ) {
-  const resolved = options.renderEmbed?.(reference);
+  const resolved = options.customEmbedsRendered++ < options.maxCustomEmbeds
+    ? options.renderEmbed?.(reference) : undefined;
   return (
     <span
       key={key}

@@ -22,6 +22,7 @@ import { createEncryptedVaultAsset } from "./vaultPersistence";
 const MAXIMUM_CONCURRENT_CLIPBOARD_ASSET_WRITES = 3;
 const MAXIMUM_CLIPBOARD_ASSET_NAME_CONFLICT_RETRIES = 3;
 export const VAULT_CLIPBOARD_SOURCE_READ_TIMEOUT_MS = 8_000;
+export const VAULT_CLIPBOARD_SOURCE_READY_TIMEOUT_MS = 3_000;
 export const VAULT_CLIPBOARD_ROLLBACK_BLOCKED_MESSAGE = "저장이 확인되지 않은 중복 이미지 링크를 모두 지우면 최신 편집 내용의 자동 저장을 즉시 재개합니다.";
 
 export function beginVaultClipboardPastePendingGuard(input: {
@@ -43,6 +44,37 @@ export function beginVaultClipboardPastePendingGuard(input: {
     input.counts.delete(input.entryId);
     if (input.hasDirtyDraft()) queueMicrotask(input.resumeSave);
   };
+}
+
+/** Wait only for a transient subscription gate; never bypass the actual save checks. */
+export async function waitForVaultClipboardSourceReadiness(input: {
+  isReady: () => boolean;
+  assertCurrent: () => void;
+  signal: AbortSignal;
+  sessionSignal: AbortSignal;
+}) {
+  const deadline = performance.now() + VAULT_CLIPBOARD_SOURCE_READY_TIMEOUT_MS;
+  const signals = [input.signal, input.sessionSignal];
+  while (true) {
+    signals.forEach((signal) => signal.throwIfAborted());
+    input.assertCurrent();
+    if (input.isReady()) return;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) throw new Error("이미지 링크를 저장할 서버 준비 상태를 확인하지 못했습니다.");
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        signals.forEach((signal) => signal.removeEventListener("abort", abort));
+      };
+      const abort = () => {
+        cleanup();
+        reject(signals.find((signal) => signal.aborted)?.reason
+          ?? new DOMException("이미지 저장이 취소되었습니다.", "AbortError"));
+      };
+      const timer = setTimeout(() => { cleanup(); resolve(); }, Math.min(25, remaining));
+      signals.forEach((signal) => signal.addEventListener("abort", abort, { once: true }));
+    });
+  }
 }
 
 export async function commitVaultClipboardSourceWithConfirmation(

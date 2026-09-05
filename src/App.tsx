@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
+import { VaultDecryptionProvider } from "./context/VaultDecryptionContext";
 import { hasFeatureAccess } from "./lib/featureAccess";
 import { createLibraryCaptureLoginState } from "./lib/libraryCapture";
 import {
@@ -14,6 +15,7 @@ import {
   loadSchedulePage,
   loadSetupPage,
   loadVaultPage,
+  loadWikiPage,
   preloadProtectedRoute
 } from "./lib/routePreload";
 import type { AppFeature } from "./types";
@@ -28,6 +30,7 @@ const RecurringPage = lazy(loadRecurringPage);
 const SchedulePage = lazy(loadSchedulePage);
 const SetupPage = lazy(loadSetupPage);
 const VaultPage = lazy(loadVaultPage);
+const WikiPage = lazy(loadWikiPage);
 
 const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
@@ -172,7 +175,7 @@ export default function App() {
   const location = useLocation();
 
   return (
-    <>
+    <VaultDecryptionProvider>
       {e2eNavigationBridgeEnabled && <E2eNavigationBridge />}
       <AuthenticatedLoginTargetPreload />
       <SecureShareCopyRecovery />
@@ -196,6 +199,14 @@ export default function App() {
             element={
               <RequireAuth feature="notes">
                 {obsidianVaultEnabled ? <VaultPage /> : <NotesPage />}
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/wiki"
+            element={
+              <RequireAuth feature="notes">
+                <WikiPage />
               </RequireAuth>
             }
           />
@@ -242,6 +253,6 @@ export default function App() {
           <Route path="*" element={<Navigate to="/login" replace />} />
         </Routes>
       </Suspense>
-    </>
+    </VaultDecryptionProvider>
   );
 }

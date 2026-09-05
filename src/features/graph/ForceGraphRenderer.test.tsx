@@ -17,6 +17,10 @@ const capturedGraph = vi.hoisted(() => ({ current: null as null | {
     nodes: Array<{ fx?: number; fy?: number; id: string; x?: number; y?: number }>;
   };
   linkDirectionalArrowLength?: () => number;
+  nodeCanvasObject?: (node: { id: string; x?: number; y?: number }, context: CanvasRenderingContext2D, scale: number) => void;
+  nodeColor?: (node: { id: string }) => string;
+  nodeVal?: (node: { id: string }) => number;
+  onEngineStop?: () => void;
   onNodeClick?: (node: { id: string }, event: MouseEvent) => void;
   onNodeDrag?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
   onNodeDragEnd?: (node: { fx?: number; fy?: number; id: string; x?: number; y?: number }) => void;
@@ -127,6 +131,151 @@ beforeEach(() => {
 });
 
 describe("ForceGraphRenderer", () => {
+  it("fits an opted-in compact graph after positioning and once more when its layout settles", () => {
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      width: 224, height: 220, x: 0, y: 0, top: 0, left: 0, right: 224, bottom: 220, toJSON: () => ({})
+    });
+    try {
+      render(<ForceGraphRenderer edges={[]} fitOnLoad nodes={[{ id: "a", kind: "note", label: "A" }]}
+        onNodeOpen={vi.fn()} settings={createDefaultGlobalGraphSettings()} />);
+      expect(renderedSizes.at(-1)).toEqual({ height: 220, width: 224 });
+      const graph = capturedGraph.current!;
+      act(() => graph.onRenderFramePost?.());
+      expect(graphMethodState.zoomToFitCalls).toEqual([]);
+      Object.assign(graph.graphData.nodes[0], { x: 260, y: -80 });
+      act(() => graph.onRenderFramePost?.());
+      expect(graphMethodState.zoomToFitCalls).toEqual([{ duration: 0, padding: 64 }]);
+      expect(graph.warmupTicks).toBe(48);
+      act(() => graph.onRenderFramePost?.());
+      expect(graphMethodState.zoomToFitCalls).toHaveLength(1);
+      act(() => graph.onEngineStop?.());
+      expect(graphMethodState.zoomToFitCalls).toHaveLength(2);
+      act(() => graph.onEngineStop?.());
+      expect(graphMethodState.zoomToFitCalls).toHaveLength(2);
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
+  it.each([false, true])("does not automatically change a restored viewport (opt-in: %s)", (fitOnLoad) => {
+    render(<ForceGraphRenderer edges={[]} fitOnLoad={fitOnLoad}
+      initialViewport={{ centerX: 91, centerY: -17, zoom: 3.25 }}
+      nodes={[{ id: "a", kind: "note", label: "A" }]}
+      onNodeOpen={vi.fn()} settings={createDefaultGlobalGraphSettings()} />);
+    const graph = capturedGraph.current!;
+    Object.assign(graph.graphData.nodes[0], { x: 260, y: -80 });
+    act(() => {
+      graph.onRenderFramePost?.();
+      graph.onEngineStop?.();
+    });
+    expect(graphMethodState.zoomToFitCalls).toEqual([]);
+    expect(graphMethodState.center).toEqual({ x: 91, y: -17 });
+    expect(graphMethodState.zoom).toBe(3.25);
+    expect(graph.warmupTicks).toBe(0);
+  });
+
+  it("lets the user's first pan take priority over pending automatic fitting", () => {
+    const rendererRef = createRef<GraphRendererHandle>();
+    render(<ForceGraphRenderer edges={[]} fitOnLoad nodes={[{ id: "a", kind: "note", label: "A" }]}
+      onNodeOpen={vi.fn()} ref={rendererRef} settings={createDefaultGlobalGraphSettings()} />);
+    const graph = capturedGraph.current!;
+    Object.assign(graph.graphData.nodes[0], { x: 260, y: -80 });
+    act(() => rendererRef.current?.panBy(32, 0));
+    act(() => {
+      graph.onRenderFramePost?.();
+      graph.onEngineStop?.();
+    });
+    expect(graphMethodState.zoomToFitCalls).toEqual([]);
+    expect(graphMethodState.center).toEqual({ x: 32, y: 0 });
+  });
+
+  it("does not re-enable automatic fitting when a dragged static graph is reheated", () => {
+    render(<ForceGraphRenderer edges={[]} fitOnLoad nodes={[{ id: "a", kind: "note", label: "A" }]}
+      onNodeOpen={vi.fn()} reducedMotion settings={createDefaultGlobalGraphSettings()} />);
+    const graph = capturedGraph.current!;
+    const node = graph.graphData.nodes[0];
+    Object.assign(node, { x: 260, y: -80 });
+    act(() => graph.onNodeDrag?.(node));
+    act(() => graph.onNodeDragEnd?.(node));
+    act(() => {
+      capturedGraph.current?.onRenderFramePost?.();
+      capturedGraph.current?.onEngineStop?.();
+    });
+    expect(graphMethodState.zoomToFitCalls).toEqual([]);
+  });
+
+  it("applies configured forces when the measured canvas first mounts", () => {
+    const settings = createDefaultGlobalGraphSettings();
+    render(<ForceGraphRenderer edges={[]} nodes={[]} onNodeOpen={vi.fn()} settings={settings} />);
+    expect(graphMethodState.forceAssignments.map((assignment) => assignment.name)).toEqual(["center", "x", "y"]);
+    expect(graphMethodState.reheatCount).toBe(1);
+  });
+
+  it("does not restart a settled graph when labels or colors change", () => {
+    const settings = createDefaultGlobalGraphSettings();
+    const node: GraphNode = { id: "a", label: "Before", kind: "note" };
+    const view = render(<ForceGraphRenderer edges={[]} nodes={[node]} onNodeOpen={vi.fn()} settings={settings} />);
+    const before = capturedGraph.current?.graphData;
+    const reheats = graphMethodState.reheatCount;
+    expect(before).toBeDefined();
+    Object.assign(before!.nodes[0], { x: 80, y: -20 });
+    view.rerender(<ForceGraphRenderer
+      edges={[]}
+      nodes={[{ ...node, label: "After", color: "#abcdef" }]}
+      onNodeOpen={vi.fn()}
+      settings={{ ...settings, common: { ...settings.common, textFadeThreshold: 2 } }}
+    />);
+    expect(capturedGraph.current?.graphData).toBe(before);
+    expect(capturedGraph.current?.graphData.nodes[0]).toMatchObject({ label: "After", x: 80, y: -20 });
+    expect(capturedGraph.current?.nodeColor?.({ id: "a" })).toBe("#abcdef");
+    expect(graphMethodState.reheatCount).toBe(reheats);
+  });
+
+  it("coalesces physical-setting input before recomputing a static layout", () => {
+    vi.useFakeTimers();
+    try {
+      const settings = createDefaultGlobalGraphSettings();
+      const graphNodes: GraphNode[] = [{ id: "a", label: "A", kind: "note" }];
+      const graphEdges: GraphEdge[] = [];
+      const view = render(<ForceGraphRenderer edges={graphEdges} nodes={graphNodes} onNodeOpen={vi.fn()} reducedMotion settings={settings} />);
+      const before = capturedGraph.current?.graphData;
+      for (const linkDistance of [300, 350, 400]) {
+        view.rerender(<ForceGraphRenderer edges={graphEdges} nodes={graphNodes} onNodeOpen={vi.fn()} reducedMotion
+          settings={{ ...settings, common: { ...settings.common, linkDistance } }} />);
+        act(() => vi.advanceTimersByTime(40));
+        expect(capturedGraph.current?.graphData).toBe(before);
+      }
+      act(() => vi.advanceTimersByTime(120));
+      expect(capturedGraph.current?.graphData).not.toBe(before);
+      expect(capturedGraph.current?.graphData.nodes).toBe(before?.nodes);
+      expect(graphMethodState.reheatCount).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the hovered label readable even when ordinary labels have faded out", () => {
+    vi.useFakeTimers();
+    try {
+      const node: GraphNode = { id: "a", label: "A", kind: "note" };
+      render(<ForceGraphRenderer edges={[]} nodes={[node]} onNodeOpen={vi.fn()} settings={createDefaultGlobalGraphSettings()} />);
+      const rendered = capturedGraph.current!.graphData.nodes[0];
+      Object.assign(rendered, { x: 0, y: 0 });
+      const context = { save: vi.fn(), restore: vi.fn(), fillText: vi.fn() } as unknown as CanvasRenderingContext2D;
+      capturedGraph.current?.nodeCanvasObject?.(rendered, context, 0.1);
+      expect(context.fillText).not.toHaveBeenCalled();
+      act(() => {
+        capturedGraph.current?.onNodeHover?.(rendered);
+        vi.advanceTimersByTime(20);
+      });
+      capturedGraph.current?.nodeCanvasObject?.(rendered, context, 0.1);
+      expect(context.fillText).toHaveBeenCalledWith("A", 0, expect.any(Number));
+      expect(context.globalAlpha).toBeGreaterThan(0.8);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("publishes node and edge updates atomically when linked nodes are added or removed", () => {
     const nodeA: GraphNode = { id: "a", kind: "note", label: "A" };
     const nodeB: GraphNode = { id: "b", kind: "note", label: "B" };
@@ -674,5 +823,20 @@ describe("ForceGraphRenderer", () => {
 
     act(() => graph.onZoomEnd?.({ k: 2 }));
     expect(onViewportChange).toHaveBeenLastCalledWith({ centerX: 0, centerY: 0, zoom: 2 });
+  });
+
+  it("settles a static graph after dropping a node without leaving it pinned", () => {
+    render(<ForceGraphRenderer edges={[]} nodes={[{ id: "a", kind: "note", label: "A" }]}
+      onNodeOpen={vi.fn()} reducedMotion settings={createDefaultGlobalGraphSettings()} />);
+    const before = capturedGraph.current!.graphData;
+    const node = before.nodes[0];
+    Object.assign(node, { x: 12, y: 18 });
+    act(() => capturedGraph.current?.onNodeDrag?.(node));
+    expect(capturedGraph.current?.graphData).toBe(before);
+    act(() => capturedGraph.current?.onNodeDragEnd?.(node));
+    expect(capturedGraph.current?.graphData).not.toBe(before);
+    expect(capturedGraph.current?.graphData.nodes[0]).toBe(node);
+    expect(node.fx).toBeUndefined();
+    expect(node.fy).toBeUndefined();
   });
 });

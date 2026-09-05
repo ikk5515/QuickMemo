@@ -14,6 +14,7 @@ import type { VaultPathRewriteActivationInput } from "../../services/vaultPathRe
 import type { UserProfile } from "../../types";
 import type { VaultContentFormat, VaultEntryKind } from "../../types";
 import type { DecryptedVaultNote } from "./vaultData";
+import type { VaultDecryptionSession } from "./vaultDecryptionSession";
 import { decodeVaultAsset, encodeVaultAsset } from "./vaultAsset";
 import {
   VAULT_NAME_INDEX_VERSION,
@@ -143,13 +144,12 @@ export async function createEncryptedVaultEntry(
   options?: { targetId: string; importJobId: string }
 ) {
   const normalized = validateDraft(draft, draft.contentFormat, draft.entryKind);
-  const claimId = await vaultNameFingerprint(vaultIntegrityKey, {
+  const [claimId, noteKey] = await Promise.all([vaultNameFingerprint(vaultIntegrityKey, {
     kind: draft.entryKind,
     name: normalized.title,
     parentId: normalized.folderId,
     targetType: "entry"
-  });
-  const noteKey = await generateNoteKey();
+  }), generateNoteKey()]);
   const [encryptedTitle, encryptedBody, wrappedKey, historySummaryPayload, historySnapshot] = await Promise.all([
     encryptText(normalized.title, noteKey),
     encryptText(normalized.body, noteKey),
@@ -335,8 +335,11 @@ export async function saveEncryptedVaultEntry(
   vaultIntegrityKey: CryptoKey,
   draft: MarkdownNoteDraft,
   pathRewriteActivation?: VaultPathRewriteActivationInput,
-  pastedImageSourceCommit?: VaultPastedImageSourceCommitCredential
+  pastedImageSourceCommit?: VaultPastedImageSourceCommitCredential,
+  decryptionSession?: VaultDecryptionSession
 ) {
+  decryptionSession?.assertSession(uid, privateKey);
+  const sessionSignal = decryptionSession?.signal;
   if (note.contentFormat === "legacy-html-v1") {
     throw new Error("기존 HTML 노트는 Markdown 복사본으로 변환한 뒤 편집할 수 있습니다.");
   }
@@ -405,7 +408,9 @@ export async function saveEncryptedVaultEntry(
     };
   }
 
-  const noteKey = await unwrapNoteKey(wrappedKey, privateKey);
+  const noteKey = decryptionSession
+    ? await decryptionSession.getNoteKey(note, uid, privateKey, sessionSignal)
+    : await unwrapNoteKey(wrappedKey, privateKey);
   const [encryptedTitle, encryptedBody, historySummaryPayload, historySnapshot] = await Promise.all([
     changedFields.includes("title")
       ? encryptText(normalized.title, noteKey)
@@ -421,6 +426,9 @@ export async function saveEncryptedVaultEntry(
     }), noteKey)
   ]);
 
+  // A lock or ACL change invalidates the captured session even when native
+  // WebCrypto completed after the revocation. Never start a stale write.
+  sessionSignal?.throwIfAborted();
   const result = await updateRevisionedEncryptedNote({
     changedFields,
     encryptedBody,

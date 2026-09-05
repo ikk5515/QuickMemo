@@ -25,6 +25,22 @@ const vaultArchivedFilePreviewSource = readFileSync(
 );
 
 describe("VaultPage security boundaries", () => {
+  it("binds the image readiness wait to the original session and scope before the guarded save", () => {
+    const paste = vaultPageSource.match(/async function pasteImagesIntoMarkdownEntry[\s\S]*?async function /u)?.[0] ?? "";
+    const commit = paste.match(/commitSource: async[\s\S]*?confirmAssetDestination:/u)?.[0] ?? "";
+    expect(paste.indexOf("const sourceSessionSignal = decryptionSession.signal"))
+      .toBeLessThan(paste.indexOf("await import("));
+    expect(commit).toContain("requireCurrentAccessScope()");
+    expect(commit).toContain("decryptionSession.assertSession(profile.uid, privateKey)");
+    expect(commit).toContain("sessionSignal: sourceSessionSignal");
+    expect(commit).toContain("isReady: () => vaultNameWritesReadyRef.current");
+    expect(commit.indexOf("await pasteModule.waitForVaultClipboardSourceReadiness"))
+      .toBeLessThan(commit.indexOf("await saveEntryRef.current"));
+    expect(commit).toContain("candidate.body.includes(source)");
+    expect(commit).toContain("(candidate.revision ?? 0) > minimumRevision");
+    expect(commit).toContain("vaultPasteLockId: destination.lockId");
+  });
+
   it("routes asset embeds through the signature-checked Blob preview instead of rendering asset JSON", () => {
     const embedRenderer = vaultPageSource.match(
       /function renderMarkdownEmbed[\s\S]*?async function copyCurrent/u
@@ -59,17 +75,33 @@ describe("VaultPage security boundaries", () => {
 
   it("wipes note-derived plaintext when the authorized folder listener fails", () => {
     const folderSubscription = vaultPageSource.match(
-      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, privateKey, profile, vaultIntegrityRetryAttempt\]\);/u
+      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile, vaultIntegrityRetryAttempt\]\);/u
     )?.[0] ?? "";
+    const errorCallback = folderSubscription.match(/\}, \(\) => \{[\s\S]*?\}, \(allFolders, metadata\) =>/u)?.[0] ?? "";
+    expect(errorCallback).toContain("clearVaultPlaintextForAccessScope();");
+    expect(errorCallback).toContain("setFolderServerReservationSignature(null)");
+    expect(errorCallback).toContain("setNoteServerReservationSignature(null)");
+    expect(errorCallback).not.toContain("preserveAuthorizedVaultDrafts");
+  });
 
-    expect(folderSubscription).toContain("clearVaultPlaintextForAccessScope();");
-    expect(folderSubscription).toContain("setFolderServerReservationSignature(null)");
-    expect(folderSubscription).toContain("setNoteServerReservationSignature(null)");
+  it("restores only reauthorized dirty drafts after a folder contraction clears all plaintext caches", () => {
+    const folderCallback = vaultPageSource.match(/return subscribeNoteFolders\(profile\.uid,[\s\S]*?\}, \(\) => \{/u)?.[0] ?? "";
+    expect(folderCallback).toContain("decryptionSession.matches(profile.uid, privateKey) ? privateKey : null");
+    expect(folderCallback).toContain("previousNotes: activeNoteSnapshotsRef.current");
+    expect(folderCallback).toContain("nextNotes: activeNotes");
+    expect(folderCallback.indexOf("preserveAuthorizedVaultDrafts({"))
+      .toBeLessThan(folderCallback.indexOf("clearVaultPlaintextForAccessScope();"));
+    expect(folderCallback.indexOf("clearVaultPlaintextForAccessScope();"))
+      .toBeLessThan(folderCallback.indexOf("draftsRef.current = preserved.drafts"));
+    expect(folderCallback).toContain("draftBaseSnapshotsRef.current = preserved.baseSnapshots");
+    expect(folderCallback).toContain("[...preserved.entryIds].map((entryId)");
+    expect(folderCallback).not.toContain("notesRef.current =");
+    expect(folderCallback).not.toContain("setDecryptedNotes(");
   });
 
   it("invalidates path-rewrite continuations at every Vault access-scope boundary", () => {
     const scopeClear = vaultPageSource.match(
-      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[\]\);/u
+      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[decryptionSession, resetPastedImageFolderRuntime\]\);/u
     )?.[0] ?? "";
     expect(scopeClear).toContain("pathRewriteRecoveryGenerationRef.current += 1;");
     expect(scopeClear).toContain("pathRewriteCleanupSessionRef.current = null;");
@@ -142,7 +174,7 @@ describe("VaultPage security boundaries", () => {
 
   it("does not let another owner's valid shared filename block body-only saves or owner-scoped creates", () => {
     const saveEntry = vaultPageSource.match(
-      /const saveEntry = useCallback[\s\S]*?useEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
+      /const saveEntry = useCallback[\s\S]*?useLayoutEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
     )?.[0] ?? "";
     expect(saveEntry).not.toContain("const duplicate = currentNotes.some");
 
@@ -308,7 +340,7 @@ describe("VaultPage security boundaries", () => {
     expect(pasteHandler).toContain("if (!accessScopeIsCurrent()) {");
     expect(pasteHandler).toContain("if (accessScopeIsCurrent() && !signal.aborted)");
     const saveEntry = vaultPageSource.match(
-      /const saveEntry = useCallback[\s\S]*?useEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
+      /const saveEntry = useCallback[\s\S]*?useLayoutEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
     )?.[0] ?? "";
     expect(saveEntry).toContain("pendingClipboardPasteCountsRef.current.has(entryId)");
     expect(saveEntry).toContain("pastedImageSourceCommit");
@@ -398,6 +430,10 @@ describe("VaultPage security boundaries", () => {
     expect(folderTrash).toContain("deletingEntryIdsRef.current.add(entryId)");
     expect(folderTrash).toContain("if (pathRewriteBusyRef.current) {");
     expect(folderTrash).toContain("ownsPathLock = true");
+    expect(folderTrash).toContain("await flushDirtyEntries(false)");
+    expect(folderTrash.indexOf("await flushDirtyEntries(false)"))
+      .toBeLessThan(folderTrash.indexOf("await trashRevisionedEncryptedFolderSubtree({"));
+    expect(folderTrash).toContain("Object.values(draftsRef.current).some((draft) => draft.dirty)");
     expect(folderTrash.match(/clipboardAssetsPendingForEntry/gu)?.length ?? 0).toBeGreaterThanOrEqual(2);
     expect(folderTrash).toContain("sourceNoteIds: shareableSourceNoteIds");
     expect(folderTrash).toContain("await trashRevisionedEncryptedFolderSubtree({");
@@ -484,12 +520,16 @@ describe("VaultPage security boundaries", () => {
       /const readCurrentServerVaultEntry = useCallback[\s\S]*?const prepareDraftMergeConflict/u
     )?.[0] ?? "";
     expect(serverRead).toContain("getVisibleNotesByIdsFromServer(profile.uid, [entryId])");
-    expect(serverRead).toContain("decryptVaultNotes(result.notes, profile.uid, privateKey)");
+    expect(serverRead).toContain("decryptVaultNotes(result.notes, profile.uid, privateKey, {");
+    expect(serverRead).toContain("session: decryptionSession");
+    expect(serverRead).toContain("signal: sessionSignal");
+    expect(serverRead.indexOf("const sessionSignal = decryptionSession.signal"))
+      .toBeLessThan(serverRead.indexOf("await getVisibleNotesByIdsFromServer"));
     expect(serverRead).toContain("remote.participantUids.includes(profile.uid)");
     expect(serverRead).toContain("remote.wrappedKeys[profile.uid]");
 
     const saveEntry = vaultPageSource.match(
-      /const saveEntry = useCallback[\s\S]*?useEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
+      /const saveEntry = useCallback[\s\S]*?useLayoutEffect\(\(\) => \{\n\s+saveEntryRef\.current/u
     )?.[0] ?? "";
     expect(saveEntry).toContain("caught instanceof NoteRevisionConflictError");
     expect(saveEntry).toContain("prepareDraftMergeConflict(entryId, false)");

@@ -938,10 +938,26 @@ function sortedByUpdatedAt(notes: NoteSnapshot[]) {
   return [...notes].sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
 }
 
-function noteSnapshotList(snapshot: { docs: Array<{ id: string; data: () => unknown }> }, noteFilter: (note: NoteSnapshot) => boolean) {
+function noteSnapshotList(
+  snapshot: { docs: Array<{ id: string; data: () => unknown }> },
+  noteFilter: (note: NoteSnapshot) => boolean,
+  repairLegacyDeletionMetadata = true
+) {
   const notes = snapshot.docs.map((document) => ({ id: document.id, ...(document.data() as NoteDocument) })).filter(noteFilter);
-  normalizeLegacyDeletionMetadata(notes);
+  if (repairLegacyDeletionMetadata) normalizeLegacyDeletionMetadata(notes);
   return sortedByUpdatedAt(notes);
+}
+
+/** Preserve stable references only when every stored field still matches. */
+export function reuseUnchangedNoteSnapshots(previous: NoteSnapshot[], next: NoteSnapshot[]): NoteSnapshot[] {
+  const byId = new Map(previous.map((note) => [note.id, note]));
+  const stable = next.map((note) => {
+    const candidate = byId.get(note.id);
+    return candidate && sameFolderSnapshotValue(candidate, note) ? candidate : note;
+  });
+  return stable.length === previous.length && stable.every((note, index) => note === previous[index])
+    ? previous
+    : stable;
 }
 
 function serverSnapshotMetadata(snapshot: {
@@ -966,6 +982,11 @@ function subscribeNotesByDeletedState(
   repairLegacyDeletionMetadata = true
 ) {
   const noteFilter = deleted ? deletedNote : visibleNote;
+  let previousEmission: NoteSnapshot[] = [];
+  const emit = (notes: NoteSnapshot[], metadata: ServerSnapshotMetadata) => {
+    previousEmission = reuseUnchangedNoteSnapshots(previousEmission, notes);
+    callback(previousEmission, metadata);
+  };
 
   if (ownerUids === null) {
     if (!deleted && maximumNotes) {
@@ -988,8 +1009,8 @@ function subscribeNotesByDeletedState(
           if (failed) {
             return;
           }
-          callback(
-            noteSnapshotList(snapshot, noteFilter).slice(0, boundedMaximum),
+          emit(
+            noteSnapshotList(snapshot, noteFilter, repairLegacyDeletionMetadata).slice(0, boundedMaximum),
             serverSnapshotMetadata(snapshot)
           );
         },
@@ -1001,7 +1022,7 @@ function subscribeNotesByDeletedState(
           // Clear the previous encrypted rows before surfacing the error so a
           // consumer cannot keep rendering already-decrypted note plaintext.
           failed = true;
-          callback([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
+          emit([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
           onError?.(error);
         }
       );
@@ -1033,14 +1054,14 @@ function subscribeNotesByDeletedState(
         if (failed) {
           return;
         }
-        callback(noteSnapshotList(snapshot, noteFilter), serverSnapshotMetadata(snapshot));
+        emit(noteSnapshotList(snapshot, noteFilter, repairLegacyDeletionMetadata), serverSnapshotMetadata(snapshot));
       },
       (error) => {
         if (failed) {
           return;
         }
         failed = true;
-        callback([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
+        emit([], { fromCache: false, hasPendingWrites: false, serverComplete: false });
         onError?.(error);
       }
     );
@@ -1070,7 +1091,7 @@ function subscribeNotesByDeletedState(
       .sort((left, right) => timestampMillis(right.updatedAt) - timestampMillis(left.updatedAt));
     const fromCache = Array.from(fromCacheByOwner.values()).some(Boolean);
     const hasPendingWrites = Array.from(pendingWritesByOwner.values()).some(Boolean);
-    callback(boundedMaximum ? merged.slice(0, boundedMaximum) : merged, {
+    emit(boundedMaximum ? merged.slice(0, boundedMaximum) : merged, {
       fromCache,
       hasPendingWrites,
       serverComplete: fromCacheByOwner.size === normalizedOwnerUids.length
@@ -1099,7 +1120,7 @@ function subscribeNotesByDeletedState(
         if (failedOwners.has(ownerUid)) {
           return;
         }
-        notesByOwner.set(ownerUid, noteSnapshotList(snapshot, noteFilter));
+        notesByOwner.set(ownerUid, noteSnapshotList(snapshot, noteFilter, repairLegacyDeletionMetadata));
         const metadata = serverSnapshotMetadata(snapshot);
         fromCacheByOwner.set(ownerUid, metadata.fromCache);
         pendingWritesByOwner.set(ownerUid, metadata.hasPendingWrites);
@@ -2188,7 +2209,8 @@ export function subscribeNoteFolders(
   uid: string,
   callback: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void,
   onError: (error: Error) => void,
-  onCompleteSnapshot?: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void
+  onCompleteSnapshot?: (folders: NoteFolderSnapshot[], metadata: ServerSnapshotMetadata) => void,
+  options?: { prepareVaultFolderTree?: boolean }
 ) {
   const foldersQuery = query(
     collection(db, "noteFolders"),
@@ -2197,14 +2219,19 @@ export function subscribeNoteFolders(
   );
   let limitExceeded = false;
   let previousActiveFolders: NoteFolderSnapshot[] | null = null;
+  let closed = false;
+  const reportError = (error: Error) => {
+    if (!closed) onError(error);
+  };
 
-  return onSnapshot(
+  const unsubscribe = onSnapshot(
     foldersQuery,
     { includeMetadataChanges: true },
     (snapshot) => {
+      if (closed) return;
       if (snapshot.docs.length > maxNoteFoldersPerOwner) {
         if (!limitExceeded) {
-          onError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
+          reportError(new NoteFolderLimitError(maxNoteFoldersPerOwner, "subscription"));
         }
         limitExceeded = true;
         return;
@@ -2215,12 +2242,13 @@ export function subscribeNoteFolders(
       const allFolders = snapshot.docs
         .map((document) => ({ id: document.id, ...(document.data() as NoteFolderDocument) }));
       const { activeFolders } = partitionVaultFolderTrash(allFolders);
-      if (metadata.serverComplete) {
+      if (metadata.serverComplete && options?.prepareVaultFolderTree !== false) {
         void ensureVaultFolderTree(uid).catch((error: unknown) => {
-          onError(error instanceof Error ? error : new Error("Vault 폴더 트리를 준비하지 못했습니다."));
+          reportError(error instanceof Error ? error : new Error("Vault 폴더 트리를 준비하지 못했습니다."));
         });
       }
       onCompleteSnapshot?.(allFolders, metadata);
+      if (closed) return;
       const sortedActiveFolders = activeFolders.sort((left, right) => {
         const orderDifference = (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER);
         return orderDifference || left.name.localeCompare(right.name, "ko");
@@ -2235,8 +2263,15 @@ export function subscribeNoteFolders(
       previousActiveFolders = sortedActiveFolders;
       callback(sortedActiveFolders, metadata);
     },
-    onError
+    reportError
   );
+  return () => {
+    // A queued snapshot or tree-preparation rejection can arrive after the
+    // route changes. It must not invalidate the next route's unlocked session.
+    closed = true;
+    previousActiveFolders = null;
+    unsubscribe();
+  };
 }
 
 export function subscribeDeletedNoteFolders(

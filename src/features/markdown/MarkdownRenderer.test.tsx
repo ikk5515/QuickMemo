@@ -198,6 +198,20 @@ describe("MarkdownRenderer", () => {
     expect(onLinkClick).not.toHaveBeenCalled();
   });
 
+  it("bounds custom embeds per render and preserves the remaining inert file links", () => {
+    const renderEmbed = vi.fn((reference) => <span data-testid="asset">{reference.display}</span>);
+    const source = "![[one.png]] ![[two.png]] ![[three.png]]";
+    const view = render(<MarkdownRenderer maxCustomEmbeds={2} renderEmbed={renderEmbed} source={source} />);
+    expect(screen.getAllByTestId("asset")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: /three.png/ })).toBeInTheDocument();
+    expect(renderEmbed).toHaveBeenCalledTimes(2);
+    renderEmbed.mockClear();
+    view.rerender(<MarkdownRenderer className="rerender" maxCustomEmbeds={2} renderEmbed={renderEmbed} source={source} />);
+    expect(screen.getAllByTestId("asset")).toHaveLength(2);
+    expect(renderEmbed).toHaveBeenCalledTimes(2);
+    expect(view.container.querySelector("p div")).toBeNull();
+  });
+
   it("typesets trusted-off KaTeX math and leaves active commands inert", async () => {
     const { container } = render(
       <MarkdownRenderer

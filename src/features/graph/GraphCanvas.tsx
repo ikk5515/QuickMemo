@@ -70,6 +70,8 @@ function mirrorGraphViewport(element: HTMLElement | null, viewport: GraphViewpor
 export interface GraphCanvasProps {
   activeNodeId?: string;
   edges: readonly GraphEdge[];
+  /** Fit a new graph before interaction; a saved initialViewport takes priority. */
+  fitOnLoad?: boolean;
   initialViewport?: GraphViewport;
   nodes: readonly GraphNode[];
   onHoveredNodeChange?: (node: GraphNode | null) => void;
@@ -226,6 +228,7 @@ export function GraphAccessibilityList({
 export function GraphCanvas({
   activeNodeId,
   edges,
+  fitOnLoad,
   initialViewport,
   nodes,
   onHoveredNodeChange,
@@ -256,16 +259,16 @@ export function GraphCanvas({
 
   const shouldRenderCanvas = renderMode === "canvas" || (renderMode === "auto" && canvasSupported);
   const [accessibilityOpen, setAccessibilityOpen] = useState(!shouldRenderCanvas);
+  const timelineRequested = settings.scope === "global" && settings.animate;
   const chronologicalNodes = useMemo(
-    () => nodes
+    () => timelineRequested ? nodes
       .filter((node): node is GraphNode & { createdAt: number } => (
         typeof node.createdAt === "number" && Number.isFinite(node.createdAt)
       ))
-      .slice()
-      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id)),
-    [nodes]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id)) : [],
+    [nodes, timelineRequested]
   );
-  const timelineEnabled = settings.scope === "global" && settings.animate && chronologicalNodes.length > 0;
+  const timelineEnabled = timelineRequested && chronologicalNodes.length > 0;
   const lastTimelinePosition = Math.max(0, chronologicalNodes.length - 1);
   const effectiveTimelinePosition = timelinePosition === null
     ? lastTimelinePosition
@@ -321,6 +324,11 @@ export function GraphCanvas({
   }, [effectiveTimelinePosition, lastTimelinePosition, reducedMotion, timelineEnabled, timelinePlaying]);
 
   function handleKeyboardNavigation(event: KeyboardEvent<HTMLElement>) {
+    if (
+      event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey
+      || (event.target instanceof Element && event.target !== event.currentTarget
+        && event.target.closest("input, textarea, select, button, a, summary, [contenteditable='true'], [role='slider']"))
+    ) return;
     const renderer = rendererRef.current;
     const action = graphKeyboardAction(event.key, event.shiftKey);
     if (!action) {
@@ -387,6 +395,7 @@ export function GraphCanvas({
     </div>
   );
   const observedViewport = observedViewportRef.current;
+  const visibleHoveredNode = hoveredNode ? visibleNodes.find((node) => node.id === hoveredNode.id) : undefined;
 
   return (
     <section
@@ -491,6 +500,7 @@ export function GraphCanvas({
               <LazyForceGraphRenderer
                 activeNodeId={activeNodeId}
                 edges={visibleEdges}
+                fitOnLoad={fitOnLoad}
                 initialViewport={initialViewport}
                 nodes={visibleNodes}
                 onHoveredNodeChange={(node) => {
@@ -514,11 +524,11 @@ export function GraphCanvas({
             </Suspense>
           </GraphCanvasErrorBoundary>
         ) : fallback}
-        {hoveredNode ? (
+        {visibleHoveredNode ? (
           <aside aria-live="polite" className="qm-graph-preview">
-            <strong>{hoveredNode.label}</strong>
-            {hoveredNode.path ? <span>{hoveredNode.path}</span> : null}
-            {hoveredNode.preview ? <p>{hoveredNode.preview}</p> : null}
+            <strong>{visibleHoveredNode.label}</strong>
+            {visibleHoveredNode.path ? <span>{visibleHoveredNode.path}</span> : null}
+            {visibleHoveredNode.preview ? <p>{visibleHoveredNode.preview}</p> : null}
           </aside>
         ) : null}
       </div>

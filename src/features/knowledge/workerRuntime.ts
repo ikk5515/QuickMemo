@@ -1,4 +1,4 @@
-import { buildGraphSnapshot } from "./graph";
+import { buildGraphSnapshot, graphSnapshotCacheKey } from "./graph";
 import {
   backlinkOccurrences,
   buildKnowledgeIndex,
@@ -9,7 +9,7 @@ import {
   upsertKnowledgeIndex
 } from "./knowledgeIndex";
 import { matchesVaultSearchQuery, parseVaultSearchQuery } from "./query";
-import type { KnowledgeIndex, ParsedMarkdownMetadata, VaultIndexEntry } from "./types";
+import type { GraphSnapshot, KnowledgeIndex, ParsedMarkdownMetadata, VaultIndexEntry } from "./types";
 import type {
   KnowledgeMetadataLinkSummary,
   KnowledgeMetadataSummary,
@@ -174,6 +174,10 @@ export function createKnowledgeWorkerRuntime(
   let index = emptyIndex();
   let version = 0;
   let disposed = false;
+  // One projection per scope keeps simultaneous global/local views fast. The
+  // cache belongs to this decrypted worker session and is cleared on every
+  // mutation and disposal; neither plaintext nor settings leave the worker.
+  const graphSnapshots = new Map<GraphSnapshot["scope"], { key: string; snapshot: GraphSnapshot }>();
 
   const replace = (entries: readonly VaultIndexEntry[]) => {
     const previousEntryIds = index.entries.map((entry) => entry.id);
@@ -188,6 +192,7 @@ export function createKnowledgeWorkerRuntime(
       entriesById.set(entryId, entry);
     }
     index = nextIndex;
+    graphSnapshots.clear();
     version += 1;
     return Array.from(new Set([
       ...previousEntryIds,
@@ -201,6 +206,7 @@ export function createKnowledgeWorkerRuntime(
     const nextIndex = upsertKnowledgeIndex(previousIndex, copiedEntry);
     entriesById.set(copiedEntry.id, copiedEntry);
     index = nextIndex;
+    graphSnapshots.clear();
     version += 1;
     return Array.from(new Set([
       ...(getKnowledgeIndexUpdateDiagnostics(index)?.changedMetadataEntryIds ?? [entry.id]),
@@ -213,6 +219,7 @@ export function createKnowledgeWorkerRuntime(
     const nextIndex = removeKnowledgeIndex(previousIndex, entryId);
     entriesById.delete(entryId);
     index = nextIndex;
+    graphSnapshots.clear();
     version += 1;
     return Array.from(new Set([
       ...(getKnowledgeIndexUpdateDiagnostics(index)?.changedMetadataEntryIds ?? [entryId]),
@@ -342,19 +349,28 @@ export function createKnowledgeWorkerRuntime(
             });
             return;
           }
-          case "graph-snapshot":
+          case "graph-snapshot": {
+            const key = graphSnapshotCacheKey(request.settings, request.activeEntryId);
+            let cached = graphSnapshots.get(request.settings.scope);
+            if (!cached || cached.key !== key) {
+              cached = {
+                key,
+                snapshot: buildGraphSnapshot(index, request.settings, { activeEntryId: request.activeEntryId })
+              };
+              graphSnapshots.set(request.settings.scope, cached);
+            }
             options.postMessage({
               id: request.id,
               type: "graph-snapshot",
               version,
-              snapshot: buildGraphSnapshot(index, request.settings, {
-                activeEntryId: request.activeEntryId
-              })
+              snapshot: cached.snapshot
             });
             return;
+          }
           case "dispose":
             disposed = true;
             entriesById.clear();
+            graphSnapshots.clear();
             index = emptyIndex();
             options.postMessage({ id: request.id, type: "disposed" });
             options.close?.();

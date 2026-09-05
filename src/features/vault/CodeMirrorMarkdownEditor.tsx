@@ -586,10 +586,6 @@ export function CodeMirrorMarkdownEditor({
     onSelectionChangeRef.current?.(initialSelection.empty
       ? null
       : { start: initialSelection.from, end: initialSelection.to });
-    if (autoFocus) {
-      view.focus();
-    }
-
     return () => {
       view.dom.removeEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
       viewRef.current = null;
@@ -605,6 +601,12 @@ export function CodeMirrorMarkdownEditor({
     // The editor instance must survive callback/value changes for one note,
     // but a different document gets a fresh undo history.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ariaLabel, documentKey]);
+
+  useEffect(() => {
+    // Source/Live Preview changes focus policy for the same document. Keep its
+    // editor, undo history, and pending image range alive while applying focus.
+    if (autoFocus) viewRef.current?.focus();
   }, [ariaLabel, autoFocus, documentKey]);
 
   useEffect(() => {

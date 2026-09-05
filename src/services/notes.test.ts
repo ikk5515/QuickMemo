@@ -31,6 +31,7 @@ import {
   resolveRevisionedVaultNameCollision,
   restoreRevisionedNote,
   restoreRevisionedEncryptedFolderSubtree,
+  reuseUnchangedNoteSnapshots,
   subscribeDeletedNoteFolders,
   subscribeMyNoteStates,
   subscribeNoteAttachments,
@@ -42,7 +43,8 @@ import {
   updateEncryptedNoteFolder,
   updateRevisionedNoteAccess,
   updateRevisionedNoteFolder,
-  vaultNameClaimReservationMatches
+  vaultNameClaimReservationMatches,
+  type NoteSnapshot
 } from "./notes";
 import { VaultNoteApiError } from "./vaultNoteMutations";
 
@@ -2000,6 +2002,97 @@ describe("bounded library note reads", () => {
     vi.clearAllMocks();
   });
 
+  function snapshotRow(id: string): NoteSnapshot {
+    return {
+      id,
+      type: "personal",
+      ownerUid: "owner-a",
+      participantUids: ["owner-a", "reader-b"],
+      encryptedTitle: { ...encryptedPayload },
+      encryptedBody: { ...encryptedPayload },
+      wrappedKeys: { "owner-a": { ...wrappedKey }, "reader-b": { ...wrappedKey } },
+      updatedBy: "owner-a",
+      isDeleted: false,
+      updatedAt: {
+        seconds: 100,
+        nanoseconds: 123,
+        toMillis: () => 100_000.000123,
+        toDate: () => new Date(100_000),
+        toJSON: () => ({ seconds: 100, nanoseconds: 123, type: "firestore/timestamp/1.0" }),
+        valueOf: () => "062135596900.000000123",
+        isEqual: () => true
+      } as NoteSnapshot["updatedAt"]
+    };
+  }
+
+  it("reuses the whole note list for equivalent Firestore data and timestamps", () => {
+    const previous = [snapshotRow("a"), snapshotRow("b")];
+    const next = [snapshotRow("a"), snapshotRow("b")];
+    expect(next[0]).not.toBe(previous[0]);
+    expect(next[0].updatedAt).not.toBe(previous[0].updatedAt);
+    expect(reuseUnchangedNoteSnapshots(previous, next)).toBe(previous);
+  });
+
+  it("replaces only the changed note while preserving unchanged rows and incoming order", () => {
+    const previous = [snapshotRow("a"), snapshotRow("b")];
+    const changed = { ...snapshotRow("b"), encryptedBody: { ...encryptedPayload, cipherText: "new-cipher" } };
+    const next = reuseUnchangedNoteSnapshots(previous, [snapshotRow("a"), changed]);
+    expect(next).not.toBe(previous);
+    expect(next[0]).toBe(previous[0]);
+    expect(next[1]).toBe(changed);
+    expect(previous[1].encryptedBody.cipherText).toBe("cipher");
+
+    const reordered = reuseUnchangedNoteSnapshots(previous, [snapshotRow("b"), snapshotRow("a")]);
+    expect(reordered).toEqual([previous[1], previous[0]]);
+    expect(reordered[0]).toBe(previous[1]);
+    const removed = reuseUnchangedNoteSnapshots(previous, [snapshotRow("a")]);
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toBe(previous[0]);
+  });
+
+  it.each([
+    ["owner", { ownerUid: "new-owner" }],
+    ["participants", { participantUids: ["owner-a"] }],
+    ["wrapped keys", { wrappedKeys: { "owner-a": { ...wrappedKey, wrappedKey: "rotated-key" } } }],
+    ["new policy field", { futureAccessPolicy: { readers: ["reader-c"] } }],
+    ["top-level paste lock", { vaultPasteLock: { id: "new-lock" } }]
+  ] as const)("does not reuse a row after %s changes without a revision change", (_label, update) => {
+    const previous = [snapshotRow("a")];
+    const changed = { ...snapshotRow("a"), ...update } as NoteSnapshot;
+    const next = reuseUnchangedNoteSnapshots(previous, [changed]);
+    expect(next).not.toBe(previous);
+    expect(next[0]).toBe(changed);
+  });
+
+  it("notices changes and removals inside unknown stored fields", () => {
+    const previous = [{ ...snapshotRow("a"), futureAccessPolicy: { readers: ["reader-b"], enabled: true } }];
+    const changed = { ...snapshotRow("a"), futureAccessPolicy: { readers: ["reader-c"], enabled: true } };
+    expect(reuseUnchangedNoteSnapshots(previous, [changed])[0]).toBe(changed);
+    const removed = snapshotRow("a");
+    expect(reuseUnchangedNoteSnapshots(previous, [removed])[0]).toBe(removed);
+  });
+
+  it("keeps note identity across metadata-only events while still publishing completeness", () => {
+    let listener: ((snapshot: {
+      docs: Array<{ id: string; data: () => unknown }>;
+      metadata: { fromCache: boolean; hasPendingWrites: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+    subscribeVisibleNotes("owner-a", ["owner-a"], callback, vi.fn(), 80, { repairLegacyDeletionMetadata: false });
+    const docs = [{ id: "a", data: () => snapshotRow("a") }];
+    listener?.({ docs, metadata: { fromCache: true, hasPendingWrites: false } });
+    listener?.({ docs, metadata: { fromCache: false, hasPendingWrites: true } });
+    listener?.({ docs, metadata: { fromCache: false, hasPendingWrites: false } });
+    expect(callback).toHaveBeenCalledTimes(3);
+    expect(callback.mock.calls[1][0]).toBe(callback.mock.calls[0][0]);
+    expect(callback.mock.calls[2][0]).toBe(callback.mock.calls[0][0]);
+    expect(callback.mock.calls.map((call) => call[1].serverComplete)).toEqual([false, false, true]);
+  });
+
   it("fans out bounded recent reads by authorized owner before applying a global limit", () => {
     subscribeVisibleNotes("user-a", ["user-a", "owner-b"], vi.fn(), vi.fn(), 80);
 
@@ -2260,6 +2353,43 @@ describe("bounded library note reads", () => {
     expect(mocks.getDocs).not.toHaveBeenCalled();
     expect(mocks.updateDoc).not.toHaveBeenCalled();
     expect(mocks.onSnapshot).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["owner", ["readonly-owner"], undefined],
+    ["bounded administrator", null, 80],
+    ["unbounded administrator", null, undefined]
+  ] as const)("never repairs callback documents in a read-only %s subscription", async (_label, ownerUids, maximumNotes) => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+    subscribeVisibleNotes("readonly-owner", ownerUids ? [...ownerUids] : null, callback, vi.fn(), maximumNotes, {
+      repairLegacyDeletionMetadata: false
+    });
+    listener?.({
+      docs: [{
+        // This legacy row would trigger updateDoc if the callback forgot the
+        // read-only flag even though the initial migration scan is disabled.
+        id: `readonly-legacy-${_label}`,
+        data: () => ({ ownerUid: "readonly-owner", participantUids: ["readonly-owner"] })
+      }],
+      metadata: { fromCache: false, hasPendingWrites: false }
+    });
+    await Promise.resolve();
+    expect(callback).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: `readonly-legacy-${_label}` })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+    expect(mocks.getDocs).not.toHaveBeenCalled();
+    expect(mocks.updateDoc).not.toHaveBeenCalled();
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
   });
 
   it("paginates owner-safe legacy normalization beyond the visible-note limit", async () => {
@@ -2553,6 +2683,99 @@ describe("personal note state subscriptions", () => {
 describe("note folder subscriptions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("ignores every queued snapshot and listener error after unsubscribe", () => {
+    let listener: ((snapshot: { docs: Array<{ data: () => unknown; id: string }> }) => void) | undefined;
+    let errorListener: ((error: Error) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const callback = vi.fn();
+    const onCompleteSnapshot = vi.fn();
+    const onError = vi.fn();
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      errorListener = args[3] as typeof errorListener;
+      return unsubscribe;
+    });
+    const cleanup = subscribeNoteFolders("owner", callback, onError, onCompleteSnapshot);
+    listener?.({ docs: [{ id: "current", data: () => ({ name: "현재 폴더" }) }] });
+    cleanup();
+    listener?.({ docs: [{ id: "late", data: () => ({ name: "지연된 폴더" }) }] });
+    errorListener?.(new Error("late permission-denied"));
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(onCompleteSnapshot).toHaveBeenCalledOnce();
+    expect(mocks.ensureVaultFolderTree).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not surface a delayed tree-preparation failure to an unsubscribed route", async () => {
+    let listener: ((snapshot: { docs: Array<{ data: () => unknown; id: string }> }) => void) | undefined;
+    let rejectPreparation!: (error: Error) => void;
+    mocks.ensureVaultFolderTree.mockReturnValueOnce(new Promise((_resolve, reject) => { rejectPreparation = reject; }));
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+    const callback = vi.fn();
+    const onError = vi.fn();
+    const cleanup = subscribeNoteFolders("owner", callback, onError);
+    listener?.({ docs: [] });
+    expect(mocks.ensureVaultFolderTree).toHaveBeenCalledOnce();
+    cleanup();
+    rejectPreparation(new Error("permission-denied after leaving Vault"));
+    await Promise.resolve();
+    expect(callback).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("still surfaces tree-preparation failures while the subscriber is active", async () => {
+    let listener: ((snapshot: { docs: Array<{ data: () => unknown; id: string }> }) => void) | undefined;
+    const permissionError = new Error("permission-denied");
+    mocks.ensureVaultFolderTree.mockRejectedValueOnce(permissionError);
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+    const onError = vi.fn();
+    const cleanup = subscribeNoteFolders("owner", vi.fn(), onError);
+    listener?.({ docs: [] });
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith(permissionError));
+    cleanup();
+  });
+
+  it("emits read-only folder snapshots without preparing or writing the vault tree", async () => {
+    let listener: ((snapshot: {
+      docs: Array<{ data: () => unknown; id: string }>;
+      metadata: { fromCache: boolean; hasPendingWrites: boolean };
+    }) => void) | undefined;
+    const callback = vi.fn();
+    const onCompleteSnapshot = vi.fn();
+    const onError = vi.fn();
+    mocks.onSnapshot.mockImplementation((...args: unknown[]) => {
+      listener = args[2] as typeof listener;
+      return vi.fn();
+    });
+    subscribeNoteFolders("readonly-owner", callback, onError, onCompleteSnapshot, { prepareVaultFolderTree: false });
+    const docs = [
+      { id: "active", data: () => ({ name: "메모", parentId: null }) },
+      { id: "trashed", data: () => ({ name: "휴지통", parentId: null, isDeleted: true }) }
+    ];
+    listener?.({ docs, metadata: { fromCache: true, hasPendingWrites: false } });
+    listener?.({ docs, metadata: { fromCache: false, hasPendingWrites: false } });
+    await Promise.resolve();
+    expect(callback).toHaveBeenLastCalledWith(
+      [expect.objectContaining({ id: "active" })],
+      { fromCache: false, hasPendingWrites: false, serverComplete: true }
+    );
+    expect(onCompleteSnapshot.mock.calls.at(-1)?.[0].map((folder: { id: string }) => folder.id)).toEqual(["active", "trashed"]);
+    expect(mocks.ensureVaultFolderTree).not.toHaveBeenCalled();
+    expect(mocks.repairVaultFolderTree).not.toHaveBeenCalled();
+    expect(mocks.mutateVaultFolder).not.toHaveBeenCalled();
+    expect(mocks.updateDoc).not.toHaveBeenCalled();
+    expect(mocks.setDoc).not.toHaveBeenCalled();
+    expect(mocks.writeBatch).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("uses one bounded sentinel document and never emits a truncated folder list", () => {

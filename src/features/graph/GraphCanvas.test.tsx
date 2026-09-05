@@ -276,6 +276,13 @@ describe("GraphCanvas", () => {
     expect(screen.getByRole("slider", { name: "그래프 생성일 위치" })).toHaveValue("1");
     expect(screen.getByRole("button", { name: "새 노트, 노트, 연결 1개" })).toBeInTheDocument();
 
+    // Arrow keys belong to the range control, not to the enclosing graph's
+    // pan shortcuts. Also preserve browser zoom/navigation modifier keys.
+    expect(fireEvent.keyDown(screen.getByRole("slider", { name: "그래프 생성일 위치" }), { key: "ArrowLeft" })).toBe(true);
+    expect(fireEvent.keyDown(screen.getByRole("region", { name: "전체 그래프" }), { key: "+", ctrlKey: true })).toBe(true);
+    expect(canvasRendererState.panCalls).toEqual([]);
+    expect(canvasRendererState.zoomCalls).toEqual([]);
+
     fireEvent.change(screen.getByRole("slider", { name: "그래프 생성일 위치" }), { target: { value: "0" } });
     expect(screen.getByRole("button", { name: "오래된 노트, 노트, 연결 0개" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /새 노트/ })).not.toBeInTheDocument();

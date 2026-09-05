@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import { VAULT_MARKDOWN_IMAGE_ACCEPT } from "./clipboardImagePaste";
 import { CodeMirrorMarkdownEditor } from "./CodeMirrorMarkdownEditor";
@@ -174,6 +175,94 @@ describe("CodeMirrorMarkdownEditor", () => {
       await Promise.resolve();
     });
     expect(onChange).toHaveBeenLastCalledWith("![[이미지.png]]저장된 본문");
+  });
+
+  it.each([false, true])("keeps the editor and pending image upload when changing Source/Live mode (from live=%s)", async (livePreview) => {
+    let finishPaste!: (result: { onCommit: () => Promise<boolean>; onDiscard: () => void; source: string }) => void;
+    let pasteSignal!: AbortSignal;
+    const onChange = vi.fn();
+    const onCommit = vi.fn().mockResolvedValue(true);
+    const onDiscard = vi.fn();
+    const onPasteImages = vi.fn((_files: readonly File[], context: { signal: AbortSignal }) => {
+      pasteSignal = context.signal;
+      return new Promise<{ onCommit: () => Promise<boolean>; onDiscard: () => void; source: string }>((resolve) => { finishPaste = resolve; });
+    });
+    const image = new File([new Uint8Array([1])], "upload.png", { type: "image/png" });
+    const props = { documentKey: "note-a", onChange, onPasteImages, value: "본문", valueRevision: 1 };
+    const view = render(<CodeMirrorMarkdownEditor {...props} autoFocus={!livePreview} livePreview={livePreview} />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    fireEvent.paste(editor, {
+      clipboardData: { files: [image], getData: () => "", items: [{ getAsFile: () => image, kind: "file", type: "image/png" }] }
+    });
+
+    view.rerender(<CodeMirrorMarkdownEditor {...props} autoFocus={livePreview} livePreview={!livePreview} />);
+    expect(pasteSignal.aborted).toBe(false);
+    expect(screen.getByLabelText("Markdown 편집기")).toBe(editor);
+    await act(async () => {
+      finishPaste({ onCommit, onDiscard, source: "![[붙여넣은 이미지/완료.png]]" });
+      await Promise.resolve();
+    });
+    expect(onChange).toHaveBeenLastCalledWith("![[붙여넣은 이미지/완료.png]]본문");
+    expect(onCommit).toHaveBeenCalledOnce();
+    expect(onDiscard).not.toHaveBeenCalled();
+  });
+
+  it("preserves the editing position and undo history across Source and Live Preview transitions", () => {
+    const source = "# 제목\n**본문**";
+    const onChange = vi.fn();
+    const props = { documentKey: "mode-selection", onChange, value: source };
+    const view = render(<CodeMirrorMarkdownEditor {...props} autoFocus />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const codeMirror = EditorView.findFromDOM(editor)!;
+    act(() => codeMirror.dispatch({
+      changes: { from: source.length, insert: " 추가" },
+      selection: { anchor: source.length + 3 },
+      userEvent: "input.type"
+    }));
+    const position = codeMirror.state.selection.main.head;
+    const editedSource = codeMirror.state.doc.toString();
+
+    view.rerender(<CodeMirrorMarkdownEditor {...props} livePreview />);
+    expect(screen.getByLabelText("Markdown 편집기")).toBe(editor);
+    expect(EditorView.findFromDOM(editor)).toBe(codeMirror);
+    expect(codeMirror.state.selection.main.head).toBe(position);
+    expect(codeMirror.state.doc.toString()).toBe(editedSource);
+    expect(view.container.querySelector(".cm-live-heading")).toHaveTextContent("제목");
+    expect(view.container.querySelector(".cm-live-strong")).toBeNull();
+    expect(editor).toHaveTextContent("**본문** 추가");
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    view.rerender(<CodeMirrorMarkdownEditor {...props} autoFocus />);
+    expect(EditorView.findFromDOM(editor)).toBe(codeMirror);
+    expect(codeMirror.state.selection.main.head).toBe(position);
+    expect(editor).toHaveTextContent("# 제목");
+    fireEvent.keyDown(editor, { key: "z", ctrlKey: true });
+    expect(codeMirror.state.doc.toString()).toBe(source);
+    expect(onChange).toHaveBeenLastCalledWith(source);
+  });
+
+  it("still cancels a pending image upload on actual editor unmount", async () => {
+    let finishPaste!: (result: { onDiscard: () => void; source: string }) => void;
+    let pasteSignal!: AbortSignal;
+    const onChange = vi.fn();
+    const onDiscard = vi.fn();
+    const onPasteImages = vi.fn((_files: readonly File[], context: { signal: AbortSignal }) => {
+      pasteSignal = context.signal;
+      return new Promise<{ onDiscard: () => void; source: string }>((resolve) => { finishPaste = resolve; });
+    });
+    const image = new File([new Uint8Array([1])], "upload.png", { type: "image/png" });
+    const view = render(<CodeMirrorMarkdownEditor autoFocus documentKey="note-a" onChange={onChange} onPasteImages={onPasteImages} value="본문" />);
+    fireEvent.paste(screen.getByLabelText("Markdown 편집기"), {
+      clipboardData: { files: [image], getData: () => "", items: [{ getAsFile: () => image, kind: "file", type: "image/png" }] }
+    });
+    view.unmount();
+    expect(pasteSignal.aborted).toBe(true);
+    await act(async () => {
+      finishPaste({ onDiscard, source: "![[취소할 이미지.png]]" });
+      await Promise.resolve();
+    });
+    expect(onDiscard).toHaveBeenCalledOnce();
+    expect(onChange).not.toHaveBeenCalled();
   });
 
   it("restores the exact selected text when image source persistence is not confirmed", async () => {

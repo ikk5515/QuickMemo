@@ -29,6 +29,8 @@ import {
   beginVaultClipboardPastePendingGuard,
   commitVaultClipboardSourceWithConfirmation,
   pasteVaultClipboardImages,
+  waitForVaultClipboardSourceReadiness,
+  VAULT_CLIPBOARD_SOURCE_READY_TIMEOUT_MS,
   withVaultClipboardSourceReadDeadline
 } from "./vaultClipboardPasteFlow";
 import { VaultNameConflictError } from "../../services/notes";
@@ -216,6 +218,94 @@ describe("Vault clipboard source read deadline", () => {
       () => true
     )).resolves.toBe(true);
     expect(commit).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits through a transient subscription gate before committing the image link", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    let ready = false;
+    let confirmed = false;
+    const commit = vi.fn(async () => { confirmed = true; });
+    const assertCurrent = vi.fn();
+    const pending = commitVaultClipboardSourceWithConfirmation(async () => {
+      await waitForVaultClipboardSourceReadiness({
+        isReady: () => ready, assertCurrent,
+        signal: new AbortController().signal, sessionSignal: new AbortController().signal
+      });
+      await commit();
+    }, () => confirmed, () => true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(commit).not.toHaveBeenCalled();
+    ready = true;
+    await vi.advanceTimersByTimeAsync(25);
+    expect(await pending).toBe(true);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(assertCurrent.mock.calls.length).toBeGreaterThan(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["signal", "sessionSignal"] as const)("cancels a pending readiness wait immediately on %s without starting a write", async (field) => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const commit = vi.fn();
+    const pending = waitForVaultClipboardSourceReadiness({
+      isReady: () => false, assertCurrent: () => undefined,
+      signal: new AbortController().signal, sessionSignal: new AbortController().signal,
+      [field]: controller.signal
+    }).then(commit);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(vi.getTimerCount()).toBe(1);
+    controller.abort();
+    await rejected;
+    expect(commit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rechecks access scope after waiting even when the subscription becomes ready", async () => {
+    vi.useFakeTimers();
+    let ready = false;
+    let current = true;
+    const commit = vi.fn();
+    const pending = waitForVaultClipboardSourceReadiness({
+      isReady: () => ready,
+      assertCurrent: () => { if (!current) throw new DOMException("revoked", "AbortError"); },
+      signal: new AbortController().signal, sessionSignal: new AbortController().signal
+    }).then(commit);
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    current = false;
+    ready = true;
+    await vi.advanceTimersByTimeAsync(25);
+    await rejected;
+    expect(commit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds a permanently unavailable subscription without ever accepting the source", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const commit = vi.fn();
+    const pending = waitForVaultClipboardSourceReadiness({
+      isReady: () => false, assertCurrent: () => undefined,
+      signal: new AbortController().signal, sessionSignal: new AbortController().signal
+    }).then(commit);
+    const rejected = expect(pending).rejects.toThrow("서버 준비 상태");
+    await vi.advanceTimersByTimeAsync(VAULT_CLIPBOARD_SOURCE_READY_TIMEOUT_MS);
+    await rejected;
+    expect(commit).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not delay an already-ready source or weaken exact confirmation", async () => {
+    vi.useFakeTimers();
+    const commit = vi.fn();
+    const result = await commitVaultClipboardSourceWithConfirmation(async () => {
+      await waitForVaultClipboardSourceReadiness({
+        isReady: () => true, assertCurrent: () => undefined,
+        signal: new AbortController().signal, sessionSignal: new AbortController().signal
+      });
+      await commit();
+    }, () => false, () => false);
+    expect(result).toBe(false);
+    expect(commit).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("creates one encrypted asset only after two private source checks succeed", async () => {

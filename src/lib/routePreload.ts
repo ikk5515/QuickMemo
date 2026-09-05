@@ -10,7 +10,8 @@ export type ProtectedRoutePreloadKey =
   | "library"
   | "notes"
   | "recurring"
-  | "schedule";
+  | "schedule"
+  | "wiki";
 
 export interface RoutePreloadConnection {
   effectiveType?: string;
@@ -46,6 +47,7 @@ export const loadRecurringPage = memoizeModuleLoader(() => import("../pages/Recu
 export const loadSchedulePage = memoizeModuleLoader(() => import("../pages/SchedulePage"));
 export const loadSetupPage = memoizeModuleLoader(() => import("../pages/SetupPage"));
 export const loadVaultPage = memoizeModuleLoader(() => import("../pages/VaultPage"));
+export const loadWikiPage = memoizeModuleLoader(() => import("../pages/WikiPage"));
 
 const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
@@ -56,7 +58,8 @@ const protectedRouteLoaders: Record<ProtectedRoutePreloadKey, () => Promise<Rout
   library: loadLibraryPage,
   notes: obsidianVaultEnabled ? loadVaultPage : loadNotesPage,
   recurring: loadRecurringPage,
-  schedule: loadSchedulePage
+  schedule: loadSchedulePage,
+  wiki: loadWikiPage
 };
 
 function currentConnection(): RoutePreloadConnection | null {
@@ -104,6 +107,9 @@ export function resolveProtectedRoutePreloadKey(
   }
   if (pathname === "/app" && hasFeatureAccess(profile, "notes")) {
     return "notes";
+  }
+  if (pathname === "/wiki" && hasFeatureAccess(profile, "notes")) {
+    return "wiki";
   }
   if (pathname === "/app/legacy" && hasFeatureAccess(profile, "notes")) {
     return "legacyNotes";

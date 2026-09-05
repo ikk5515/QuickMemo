@@ -74,6 +74,7 @@ describe("AppShell feature navigation", () => {
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
     expect(within(navigation).getByRole("link", { name: "일정" })).toHaveAttribute("href", "/schedule");
     expect(within(navigation).queryByRole("link", { name: "메모" })).not.toBeInTheDocument();
+    expect(within(navigation).queryByRole("link", { name: "위키" })).not.toBeInTheDocument();
     expect(within(navigation).queryByRole("link", { name: "자료실" })).not.toBeInTheDocument();
   });
 
@@ -142,7 +143,8 @@ describe("AppShell feature navigation", () => {
 
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
     expect(within(navigation).queryByRole("button", { name: /그래프/ })).not.toBeInTheDocument();
-    expect(within(navigation).getAllByRole("link")).toHaveLength(1);
+    expect(within(navigation).getAllByRole("link")).toHaveLength(2);
+    expect(within(navigation).getByRole("link", { name: "위키" })).toHaveAttribute("href", "/wiki");
     expect(within(navigation).getByRole("link", { name: "메모" })).toHaveAttribute("aria-current", "page");
   });
 
@@ -216,7 +218,7 @@ describe("AppShell feature navigation", () => {
     render(<MemoryRouter><AppShell><span>내용</span></AppShell></MemoryRouter>);
 
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
-    expect(within(navigation).getAllByRole("link").map((link) => link.textContent)).toEqual(["메모", "일정", "자료실"]);
+    expect(within(navigation).getAllByRole("link").map((link) => link.textContent)).toEqual(["메모", "위키", "일정", "자료실"]);
     expect(screen.queryByRole("link", { name: "관리자" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
 

@@ -380,7 +380,7 @@ describe("Vault workspace UI regression contract", () => {
   it("debounces dirty entries independently and never immediately retries edits made during a save", () => {
     const saveEntry = sourceBetween(
       "const saveEntry = useCallback(async (",
-      "useEffect(() => {\n    saveEntryRef.current = saveEntry;"
+      "useLayoutEffect(() => {\n    saveEntryRef.current = saveEntry;"
     );
     expect(saveEntry).toContain("entryAutosaveRef.current?.cancel(entryId);");
     expect(saveEntry).toContain("const latest = draftsRef.current[entryId];");
