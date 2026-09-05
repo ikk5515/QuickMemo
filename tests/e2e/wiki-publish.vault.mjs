@@ -5,7 +5,13 @@ import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 import { allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow, loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario } from "./helpers.mjs";
 async function explorer(page) {
   const panel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: "파일", exact: true }).click();
+  const toggle = page.locator('.vault-ribbon button[aria-controls="vault-left-panel"][aria-expanded]');
+  // URL navigation can finish before the workspace mounts or restores its layout.
+  // A closed phone drawer is absent; an open one makes the ribbon inert.
+  await expect(toggle).toBeAttached();
+  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending|conflict)$/);
+  if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
+  await expect(panel).toBeVisible();
   return panel;
 }
 async function createNote(page, title, body) {
