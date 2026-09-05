@@ -15,8 +15,8 @@ function History() {
   const navigate = useNavigate();
   return <><output data-testid="location">{location.pathname}{location.search}</output><button onClick={() => navigate(-1)}>이전 페이지</button></>;
 }
-function openLegacy(query = "") {
-  return render(<MemoryRouter initialEntries={["/before", `${legacyBase}${query}`]} initialIndex={1}>
+function openAt(path: string) {
+  return render(<MemoryRouter initialEntries={["/before", path]} initialIndex={1}>
     <Routes>
       <Route path="/before" element={<p>원래 페이지</p>} />
       <Route path="/wiki/public/:wikiId" element={<PublicWikiPage />} />
@@ -24,6 +24,7 @@ function openLegacy(query = "") {
     </Routes><History />
   </MemoryRouter>);
 }
+function openLegacy(query = "") { return openAt(`${legacyBase}${query}`); }
 function pageUrl(base: string, path: string) { return `${base}?${new URLSearchParams({ page: path })}`; }
 async function expectRequestedPage(url: string) {
   const article = await screen.findByRole("article", { name: "요청한 문서" });
@@ -46,6 +47,44 @@ beforeEach(() => {
     manifest, signal: new AbortController().signal,
     contents: new Map(manifest.entries.map((entry) => [entry.id, { ...entry, body: entry.id === "requested" ? "요청한 본문" : "다른 본문" }]))
   }, error: null }));
+});
+
+describe("canonical public wiki deep link authority", () => {
+  it.each(["?page=missing-private-path", "?note=e_11111111111111111111111111111111", "?note=asset", "?page=%EC%9D%B4%EB%AF%B8%EC%A7%80.png", "?note=", "?page=", "?page=missing-private-path&note=first", "?note=first&note=requested"])("shows only the generic unavailable state for an invalid target: %s", (query) => {
+    manifest.slug = "my-wiki"; openAt(`/wiki/my-wiki${query}`);
+    expect(screen.getByRole("alert").textContent).toBe("위키를 열 수 없습니다");
+    expect(screen.queryByRole("main", { name: "위키 읽기 패널" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+    expect(screen.queryByText("다른 본문")).not.toBeInTheDocument();
+    expect(screen.queryByText("요청한 본문")).not.toBeInTheDocument();
+    expect(screen.getByTestId("location").textContent).toBe(`/wiki/my-wiki${query}`);
+  });
+  it.each([legacyBase, "/wiki/my-wiki"])("rejects repeated page parameters on %s even when both resolve", (base) => {
+    manifest.slug = "my-wiki";
+    const query = new URLSearchParams([["page", "첫 문서.md"], ["page", "요청한 문서.md"]]);
+    openAt(`${base}?${query}`);
+    expect(screen.getByRole("alert").textContent).toBe("위키를 열 수 없습니다");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+  it("rejects an ambiguous readable path on the canonical route", () => {
+    manifest.slug = "my-wiki"; manifest.entries.push({ ...manifest.entries[1], id: "duplicate" });
+    openAt(pageUrl("/wiki/my-wiki", "요청한 문서.md"));
+    expect(screen.getByRole("alert").textContent).toBe("위키를 열 수 없습니다");
+    expect(screen.queryByRole("article")).not.toBeInTheDocument();
+  });
+  it("canonicalizes a real legacy note ID on the slug route and replaces browser history", async () => {
+    manifest.slug = "my-wiki"; openAt("/wiki/my-wiki?note=first");
+    expect(await screen.findByRole("article", { name: "첫 문서" })).toBeVisible();
+    expect(screen.queryByRole("article", { name: "요청한 문서" })).not.toBeInTheDocument();
+    expect(screen.getByTestId("location").textContent).toBe(pageUrl("/wiki/my-wiki", "첫 문서.md"));
+    fireEvent.click(screen.getByRole("button", { name: "이전 페이지" }));
+    expect(await screen.findByText("원래 페이지")).toBeVisible();
+  });
+  it("keeps a real page authoritative over a stale legacy note on the slug route", async () => {
+    manifest.slug = "my-wiki";
+    openAt(`/wiki/my-wiki?${new URLSearchParams({ page: "요청한 문서.md", note: "missing-private-id" })}`);
+    await expectRequestedPage(pageUrl("/wiki/my-wiki", "요청한 문서.md"));
+  });
 });
 
 describe("legacy public wiki deep links", () => {

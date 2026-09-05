@@ -22,22 +22,21 @@ export default function PublicWikiPage() {
   if (!data) return <main className="page-center"><div className="wiki-public-message" role={error ? "alert" : undefined}>
     {error ? <h1>위키를 열 수 없습니다</h1> : <p role="status">공개 위키를 불러오고 있습니다…</p>}
   </div></main>;
-  if (wikiId) {
-    const hasPage = params.has("page");
-    const hasNote = params.has("note");
-    const requested = hasPage ? params.get("page") : params.get("note");
-    const matches = data.manifest.entries.filter((entry) => entry.kind !== "asset" && (hasPage ? entry.path === requested : entry.id === requested));
-    const entry = matches.length === 1 ? matches[0] : undefined;
-    // A legacy ID must resolve inside this publication. Never replace a missing
-    // or ambiguous deep link with the first document during canonicalization.
-    if ((hasPage || hasNote) && (!entry || data.manifest.entries.filter((candidate) => candidate.kind !== "asset" && candidate.path === entry.path).length !== 1)) {
-      return <main className="page-center"><div className="wiki-public-message" role="alert"><h1>위키를 열 수 없습니다</h1></div></main>;
-    }
-    if (data.manifest.slug || (hasNote && !hasPage)) {
-      const base = data.manifest.slug ? `/wiki/${encodeURIComponent(data.manifest.slug)}` : `/wiki/public/${encodeURIComponent(wikiId)}`;
-      const query = entry ? `?${new URLSearchParams({ page: entry.path })}` : "";
-      return <Navigate replace to={`${base}${query}`} />;
-    }
+  const hasPage = params.has("page");
+  const hasNote = params.has("note");
+  const requested = hasPage ? params.get("page") : params.get("note");
+  const matches = data.manifest.entries.filter((entry) => entry.kind !== "asset" && (hasPage ? entry.path === requested : entry.id === requested));
+  const entry = matches.length === 1 ? matches[0] : undefined;
+  // Both public URL forms resolve only a unique, readable published target.
+  // Never replace an unavailable deep link with the first document.
+  if (params.getAll("page").length > 1 || params.getAll("note").length > 1
+    || ((hasPage || hasNote) && (!entry || data.manifest.entries.filter((candidate) => candidate.kind !== "asset" && candidate.path === entry.path).length !== 1))) {
+    return <main className="page-center"><div className="wiki-public-message" role="alert"><h1>위키를 열 수 없습니다</h1></div></main>;
+  }
+  if ((wikiId && data.manifest.slug) || hasNote) {
+    const base = data.manifest.slug ? `/wiki/${encodeURIComponent(data.manifest.slug)}` : `/wiki/public/${encodeURIComponent(wikiId)}`;
+    const query = entry ? `?${new URLSearchParams({ page: entry.path })}` : "";
+    return <Navigate replace to={`${base}${query}`} />;
   }
   return <WikiReader mode="public" title={data.manifest.title} basePath={data.manifest.slug ? `/wiki/${encodeURIComponent(data.manifest.slug)}` : `/wiki/public/${encodeURIComponent(wikiId)}`} notes={notes} folders={folders} loadingNoteIds={loadingNoteIds} publicLinkEntries={publicLinkEntries}
     renderAsset={(reference, sourceEntry) => <PublishedWikiAssetEmbed key={`${data.manifest.revision}:${sourceEntry.id}:${reference.raw}`} reader={assetReader} reference={reference} sourceEntry={sourceEntry} />}

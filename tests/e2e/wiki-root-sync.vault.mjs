@@ -1,4 +1,4 @@
-/* global window, Event, URL */
+/* global window, Event, URL, URLSearchParams */
 import { expect, test } from "@playwright/test";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime,
@@ -61,6 +61,9 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
   const diagnostics = observePage(page);
   await loginDirectly(page, fixture.viewerAuth, diagnostics); await navigateWithinApp(page, "/app");
   await createNote(page, "공개 금지 기록", "권한밖의본문은끝까지비공개");
+  const privateTabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
+  expect(privateTabId).toMatch(/^entry:/u);
+  const privateNoteId = privateTabId.slice("entry:".length);
   await createNote(page, "개별 공유 항목", "명시적으로선택하기전에는비공개");
   const panel = await explorer(page);
   page.once("dialog", (dialog) => dialog.accept("동기화 지식"));
@@ -68,6 +71,9 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
   const rootFolder = panel.getByRole("treeitem", { name: "동기화 지식", exact: true });
   await expect(rootFolder).toBeVisible(); await rootFolder.click();
   await createNote(page, "처음 공개 문서", "# 처음 공개 문서\n\n기존폴더범위유지확인\n\n[[공개 금지 기록]]");
+  const publishedTabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
+  expect(publishedTabId).toMatch(/^entry:/u);
+  const publishedSourceNoteId = publishedTabId.slice("entry:".length);
 
   const slug = `root-${fixture.viewerAuth.uid.replace(/[^a-z0-9]/giu, "").toLowerCase().slice(0, 18)}-${Date.now().toString(36)}`;
   const renamedSlug = `${slug}-v2`;
@@ -89,11 +95,35 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
 
   const anonymous = await browser.newContext({ viewport: testInfo.project.use.viewport, locale: "ko-KR", baseURL: "http://127.0.0.1:4174" });
   try {
-    const reader = await anonymous.newPage(); await reader.goto(publicUrl);
+    const reader = await anonymous.newPage();
+    const initialManifest = manifestResponse(reader, slug, 200);
+    await reader.goto(publicUrl);
+    const publishedManifest = await (await initialManifest).json();
+    const publishedNoteId = publishedManifest.entries.find((entry) => entry.title === "처음 공개 문서" && entry.kind === "markdown")?.id;
+    expect(publishedNoteId).toMatch(/^e_[0-9a-f]{32}$/u);
     await expectPublicEntry(reader, "처음 공개 문서", "기존폴더범위유지확인");
     await expect(reader.locator("body")).not.toContainText("공개 금지 기록");
     await expect(reader.locator("body")).not.toContainText("개별 공유 항목");
     await expect(reader.locator("body")).not.toContainText("권한밖의본문은끝까지비공개");
+
+    // Canonical custom-slug URLs enforce the same explicit-target boundary as
+    // legacy publication URLs, without silently opening an unrelated document.
+    const directLink = await anonymous.newPage();
+    try {
+      for (const query of [new URLSearchParams({ page: "missing-private-path" }), new URLSearchParams({ note: privateNoteId }), new URLSearchParams({ note: publishedSourceNoteId })]) {
+        await directLink.goto(`${publicUrl}?${query}`);
+        await expect(directLink.getByRole("heading", { name: "위키를 열 수 없습니다", exact: true })).toBeVisible();
+        await expect(directLink.locator("body")).toHaveText("위키를 열 수 없습니다");
+        // The test build injects one hidden navigation bridge outside the app.
+        await expect(directLink.locator(".wiki-panel, .wiki-sidebar, [contenteditable], button:not([data-quickmemo-e2e-navigation]), a")).toHaveCount(0);
+        await expect(directLink.getByRole("button")).toHaveCount(0);
+      }
+      await directLink.goto(`${publicUrl}?${new URLSearchParams({ note: publishedNoteId })}`);
+      await expect(directLink).toHaveURL((url) => url.pathname === `/wiki/${slug}`
+        && Boolean(url.searchParams.get("page")) && !url.searchParams.has("note"));
+      await expect(directLink.locator('.wiki-panel[data-active="true"] .wiki-body')).toContainText("기존폴더범위유지확인");
+      expect(directLink.url()).not.toContain(publishedNoteId);
+    } finally { await directLink.close(); }
 
     // Add a descendant through the encrypted editor UI after the folder grant.
     await page.bringToFront(); await (await explorer(page)).getByRole("treeitem", { name: "동기화 지식", exact: true }).click({ button: "right" });
