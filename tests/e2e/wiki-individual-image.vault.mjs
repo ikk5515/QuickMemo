@@ -2,7 +2,10 @@
 import { expect, test } from "@playwright/test";
 import { Buffer } from "node:buffer";
 import { allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, loginDirectly, navigateWithinApp, observePage, openVaultMoreTool, ownedVaultNotesState, seedScenario } from "./helpers.mjs";
-import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { createDistinctVaultNote, createVaultFolderWithPrompt, readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { finishWikiFixtureDiagnostics, observeWikiFixtureDiagnostics } from "./wiki-fixture-diagnostics.mjs";
+
+test.afterEach(async ({ page }, testInfo) => finishWikiFixtureDiagnostics(page, testInfo));
 
 const projects = new Set(["vault-chromium-desktop-1440", "vault-webkit-desktop-1280"]);
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -14,20 +17,30 @@ test(`explicitly publishes one image from ${folder ? "a nested note" : "an indiv
   const fixture = await seedScenario(request, "authenticated-verified");
   const diagnostics = observePage(page);
   await loginDirectly(page, fixture.viewerAuth, diagnostics); await navigateWithinApp(page, "/app");
+  const boundary = observeWikiFixtureDiagnostics(page);
   const create = page.locator('.vault-panel-toolbar button[aria-label="새 노트"]');
   await expect(create).toBeEnabled({ timeout: 40_000 });
   if (folder) {
-    page.once("dialog", (prompt) => prompt.accept(folder));
-    await page.locator('.vault-panel-toolbar button[aria-label="새 폴더"]').click();
+    boundary.mark("source-folder");
+    await createVaultFolderWithPrompt(page, page.locator('.vault-panel-toolbar button[aria-label="새 폴더"]'), folder);
     await page.getByRole("treeitem", { name: folder, exact: true }).click();
   }
-  await create.click();
+  boundary.mark("source-note");
+  const noteId = await createDistinctVaultNote(page, create);
+  const activeTab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
   const title = "Individual image document";
+  const originalBody = `# ${title}\n\nOnly the chosen image is public.`;
   const imageTitle = `${title} -1.png`, siblingTitle = `${title} -2.png`;
   await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill(title);
   const editor = page.getByRole("textbox", { name: "Markdown 편집기", exact: true });
-  await editor.fill(`# ${title}\n\nOnly the chosen image is public.`);
+  await editor.fill(originalBody);
   await saveVaultDocument(page, { allowClean: true });
+  await expect(activeTab).toHaveAttribute("id", `entry:${noteId}`);
+  await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(title);
+  expect(await readVaultEditorSource(editor)).toBe(originalBody);
+  await expect.poll(async () => (await ownedVaultNotesState(request, fixture.viewerAuth.uid)).map((note) => note.id)).toEqual([noteId]);
+  boundary.mark("image-file-selection");
+  const selectedEditor = await editor.elementHandle();
   await editor.press("ControlOrMeta+Home");
   const chooser = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "이미지 파일 추가", exact: true }).click();
@@ -35,9 +48,15 @@ test(`explicitly publishes one image from ${folder ? "a nested note" : "an indiv
     { name: "selected.png", mimeType: "image/png", buffer: png },
     { name: "private-sibling.png", mimeType: "image/png", buffer: png }
   ]);
+  await expect(activeTab).toHaveAttribute("id", `entry:${noteId}`);
+  expect(await editor.evaluate((element, selected) => element === selected, selectedEditor), "the file chooser must return to the editor that opened it").toBe(true);
+  await selectedEditor.dispose();
+  boundary.mark("image-embed-insertion");
   await expect.poll(async () => (await readVaultEditorSource(editor)).match(/!\[\[[^\]]+\.png\]\]/gu)?.length ?? 0, { timeout: 40_000 }).toBe(2);
   await saveVaultDocument(page, { allowClean: true });
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
+  await expect(activeTab).toHaveAttribute("id", `entry:${noteId}`);
+  boundary.mark("image-publication");
   await expect.poll(async () => (await ownedVaultNotesState(request, fixture.viewerAuth.uid)).length).toBe(3);
   const original = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   expect(original.filter((note) => note.entryKind === "asset")).toHaveLength(2);

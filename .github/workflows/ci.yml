@@ -131,6 +131,21 @@ jobs:
       - name: Run browser suite
         run: ${{ matrix.command }}
 
+      - name: Upload safe browser failure diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: vault-diagnostics-${{ strategy.job-index }}-${{ github.run_attempt }}
+          # Keep this file allowlist narrow; never upload traces, screenshots, or logs.
+          path: |
+            test-results/vault/**/wiki-fixture-diagnostic.json
+            test-results/vault/**/memo-motion-observation.json
+            test-results/vault/**/memo-scroll-geometry.json
+            test-results/vault/**/memo-runtime-recovery.json
+          retention-days: 3
+          if-no-files-found: ignore
+          include-hidden-files: false
+
   validate:
     name: validate
     if: ${{ always() }}

@@ -2,10 +2,13 @@
 import { expect, test } from "@playwright/test";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime,
-  loginDirectly, navigateWithinApp, observePage, openVaultMoreTool, seedScenario
+  loginDirectly, navigateWithinApp, observePage, openVaultMoreTool, ownedVaultNotesState, seedScenario
 } from "./helpers.mjs";
-import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { createDistinctVaultNote, createVaultFolderWithPrompt, readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
+import { finishWikiFixtureDiagnostics, observeWikiFixtureDiagnostics } from "./wiki-fixture-diagnostics.mjs";
+
+test.afterEach(async ({ page }, testInfo) => finishWikiFixtureDiagnostics(page, testInfo));
 
 async function explorer(page) {
   const panel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
@@ -17,16 +20,20 @@ async function explorer(page) {
   if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
   await expect(panel).toBeVisible(); return panel;
 }
-async function createNote(page, title, body) {
+async function createNote(page, request, uid, title, body) {
   const panel = await explorer(page);
   const create = panel.getByRole("button", { name: "새 노트", exact: true });
-  await expect(create).toBeEnabled({ timeout: 30_000 }); await create.click();
-  await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toBeEnabled();
+  const id = await createDistinctVaultNote(page, create);
   await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill(title);
   const editor = page.getByRole("textbox", { name: "Markdown 편집기", exact: true });
   await expect(editor).toBeEditable(); await editor.fill(body);
   await expect.poll(() => readVaultEditorSource(editor)).toBe(body);
   await saveVaultDocument(page, { allowClean: true });
+  await expect(page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]')).toHaveAttribute("id", `entry:${id}`);
+  await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(title);
+  expect(await readVaultEditorSource(editor)).toBe(body);
+  await expect.poll(async () => (await ownedVaultNotesState(request, uid)).some((note) => note.id === id)).toBe(true);
+  return id;
 }
 async function settings(page) {
   await page.bringToFront(); await openVaultMoreTool(page, "위키 공개 설정");
@@ -65,23 +72,28 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
   const fixture = await seedScenario(request, "authenticated-verified");
   const diagnostics = observePage(page);
   await loginDirectly(page, fixture.viewerAuth, diagnostics); await navigateWithinApp(page, "/app");
-  await createNote(page, "공개 금지 기록", "권한밖의본문은끝까지비공개");
+  const boundary = observeWikiFixtureDiagnostics(page);
+  boundary.mark("private-note");
+  await createNote(page, request, fixture.viewerAuth.uid, "공개 금지 기록", "권한밖의본문은끝까지비공개");
   const privateTabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
   expect(privateTabId).toMatch(/^entry:/u);
   const privateNoteId = privateTabId.slice("entry:".length);
-  await createNote(page, "개별 공유 항목", "명시적으로선택하기전에는비공개");
+  boundary.mark("individual-note");
+  await createNote(page, request, fixture.viewerAuth.uid, "개별 공유 항목", "명시적으로선택하기전에는비공개");
   const panel = await explorer(page);
-  page.once("dialog", (dialog) => dialog.accept("동기화 지식"));
-  await panel.getByRole("button", { name: "새 폴더", exact: true }).click();
+  boundary.mark("root-folder");
+  await createVaultFolderWithPrompt(page, panel.getByRole("button", { name: "새 폴더", exact: true }), "동기화 지식");
   const rootFolder = panel.getByRole("treeitem", { name: "동기화 지식", exact: true });
   await expect(rootFolder).toBeVisible(); await rootFolder.click();
-  await createNote(page, "처음 공개 문서", "# 처음 공개 문서\n\n기존폴더범위유지확인\n\n[[공개 금지 기록]]");
+  boundary.mark("initial-published-note");
+  await createNote(page, request, fixture.viewerAuth.uid, "처음 공개 문서", "# 처음 공개 문서\n\n기존폴더범위유지확인\n\n[[공개 금지 기록]]");
   const publishedTabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
   expect(publishedTabId).toMatch(/^entry:/u);
   const publishedSourceNoteId = publishedTabId.slice("entry:".length);
 
   const slug = `root-${fixture.viewerAuth.uid.replace(/[^a-z0-9]/giu, "").toLowerCase().slice(0, 18)}-${Date.now().toString(36)}`;
   const renamedSlug = `${slug}-v2`;
+  boundary.mark("initial-publication");
   let dialog = await settings(page);
   await dialog.getByRole("textbox", { name: "위키 주소", exact: true }).fill(slug);
   await expect(dialog.getByText("사용할 수 있는 주소입니다.", { exact: true })).toBeVisible();
@@ -132,14 +144,16 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
 
     // Add a descendant through the encrypted editor UI after the folder grant.
     await page.bringToFront(); await (await explorer(page)).getByRole("treeitem", { name: "동기화 지식", exact: true }).click({ button: "right" });
-    page.once("dialog", (prompt) => prompt.accept("나중에 만든 하위 폴더"));
-    await page.getByRole("menuitem", { name: "하위 폴더 만들기", exact: true }).click();
+    boundary.mark("descendant-folder");
+    await createVaultFolderWithPrompt(page, page.getByRole("menuitem", { name: "하위 폴더 만들기", exact: true }), "나중에 만든 하위 폴더");
     const freshPanel = await explorer(page);
     const parent = freshPanel.getByRole("treeitem", { name: "동기화 지식", exact: true });
     if (await parent.getAttribute("aria-expanded") !== "true") await parent.click();
     const child = freshPanel.getByRole("treeitem", { name: "나중에 만든 하위 폴더", exact: true });
     await expect(child).toBeVisible(); await child.click();
-    await createNote(page, "자동 반영 문서", "# 자동 반영 문서\n\n새하위폴더본문자동반영확인");
+    boundary.mark("descendant-note");
+    await createNote(page, request, fixture.viewerAuth.uid, "자동 반영 문서", "# 자동 반영 문서\n\n새하위폴더본문자동반영확인");
+    boundary.mark("descendant-publication");
     await reader.bringToFront();
     await (await search(reader)).fill("");
     await expect.poll(async () => {

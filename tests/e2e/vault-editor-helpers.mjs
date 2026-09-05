@@ -35,6 +35,34 @@ export async function readVaultEditorSource(editor) {
   });
 }
 
+export async function createDistinctVaultNote(page, create) {
+  const tab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
+  const previousId = await tab.count() ? await tab.getAttribute("id") : null;
+  await expect(create).toBeEnabled({ timeout: 30_000 });
+  await create.click();
+  await expect(tab).toHaveAttribute("id", /^entry:/u);
+  if (previousId) await expect(tab).not.toHaveAttribute("id", previousId);
+  await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toBeEnabled();
+  await expect(page.getByRole("textbox", { name: "Markdown 편집기", exact: true })).toBeEditable();
+  return (await tab.getAttribute("id")).slice("entry:".length);
+}
+
+export async function createVaultFolderWithPrompt(page, button, name) {
+  await Promise.all([
+    page.waitForEvent("dialog", { timeout: 15_000 }).then(async (dialog) => {
+      let accepted = false;
+      try {
+        expect(dialog.type()).toBe("prompt");
+        expect(dialog.message()).toBe("새 폴더 이름");
+        await dialog.accept(name); accepted = true;
+      } finally {
+        if (!accepted) await dialog.dismiss().catch(() => undefined);
+      }
+    }),
+    button.click()
+  ]);
+}
+
 export async function openVaultDocumentMenu(page) {
   await page.getByRole("button", { name: "문서 메뉴", exact: true }).click();
   await expect(page.getByRole("menu", { name: "파일 작업", exact: true })).toBeVisible();
