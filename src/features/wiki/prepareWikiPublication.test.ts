@@ -44,8 +44,8 @@ describe("prepareWikiPublication", () => {
     expect(result.manifest.selection).toEqual({ folderIds: ["root", "outside"], noteIds: ["top"] });
     expect(result.manifest.entries.map(entry => entry.sourceNoteId)).toEqual(["start", "other", "top"]);
     expect(result.manifest.entries.find(entry => entry.sourceNoteId === "top")).toMatchObject({ sourceFolderId: null, parentSourceFolderId: null });
-    expect(result.contents[0].body).toContain("[[Confidential/Other.md|Other]]");
-    expect(result.contents[0].body).toContain("[[Root.md|Root]]");
+    expect(result.contents[0].body).toContain("[[/Confidential/Other.md|Other]]");
+    expect(result.contents[0].body).toContain("[[/Root.md|Root]]");
     expect(JSON.stringify(result)).not.toMatch(/PrivateAncestor|private plaintext/);
   });
 
@@ -83,7 +83,7 @@ describe("prepareWikiPublication", () => {
       expect.objectContaining({ sourceNoteId: "chosen-image", sourceFolderId: "outside", parentSourceFolderId: null, kind: "asset" })
     ]);
     expect(result.contents.map((content) => content.sourceNoteId)).toEqual(["home", "chosen-image"]);
-    expect(result.contents[0].body).toBe("![[chosen.png|chosen.png]]\n\n[비공개 첨부]");
+    expect(result.contents[0].body).toBe("![[/chosen.png|chosen.png]]\n\n[비공개 첨부]");
     expect(decodeVaultAsset(result.contents[1].body).bytes).toEqual(validPng());
     expect(result.redactedLinkCount).toBe(1);
     expect(JSON.stringify(result)).not.toMatch(/PrivateAncestor|Confidential|other-image|other\.png/u);
@@ -131,10 +131,10 @@ describe("prepareWikiPublication", () => {
     ];
     const result = prepareWikiPublication({ rootFolderId: "root", notes: sources, folders });
     const home = result.contents[0].body;
-    expect(home).toContain("[[Public/Sub/Target.md#Heading|Visible]]");
+    expect(home).toContain("[[/Public/Sub/Target.md#Heading|Visible]]");
     expect(home).toContain("[Go](<Sub/Target.md#^block>)");
     expect(home).toContain("[Absolute](<Sub/Target.md>)");
-    expect(home).toContain("[[Public/Home.md#Local|Home]]");
+    expect(home).toContain("[[/Public/Home.md#Local|Home]]");
     expect(result.contents[1].body).toBe("[Back](<../Home.md>)");
     expect(home).not.toContain("PrivateAncestor");
     const paths = new Map([ ["root", "Public"], ["sub", "Public/Sub"] ]);
@@ -172,7 +172,7 @@ describe("prepareWikiPublication", () => {
       note("home", "root", "Home", "[[Target|별칭]] [[./Sub/Target#Section|Alternate]]"),
       note("target", "sub", "Target", targetBody)
     ] });
-    expect(result.contents[0].body).toBe("[[Public/Sub/Target.md|별칭]] [[Public/Sub/Target.md#Section|Alternate]]");
+    expect(result.contents[0].body).toBe("[[/Public/Sub/Target.md|별칭]] [[/Public/Sub/Target.md#Section|Alternate]]");
     expect(result.contents[1].body).toBe(targetBody);
     expect(result.redactedLinkCount).toBe(0);
   });
@@ -235,7 +235,7 @@ describe("prepareWikiPublication", () => {
     ];
     const result = prepareWikiPublication({ rootFolderId: "root", folders, notes: sources });
     expect(result.manifest.entries.map((entry) => entry.sourceNoteId)).toEqual(["home", "image"]);
-    expect(result.contents[0].body).toBe("![[Public/Sub/picture.png|Picture]]");
+    expect(result.contents[0].body).toBe("![[/Public/Sub/picture.png|Picture]]");
     expect(decodeVaultAsset(result.contents[1].body).bytes).toEqual(validPng());
     expect(result.contents[1].body).not.toMatch(/ownerUid|privatePath|private-owner|private-parent/u);
     expect(result.omittedEntryCount).toBe(2);

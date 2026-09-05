@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { getPublishedWikiAsset } from "../../services/publishedWikis";
-import { buildInternalLinkResolutionIndex, isExternalLinkTarget, resolveInternalLink } from "../knowledge/path";
+import { buildInternalLinkResolutionIndex, isExternalLinkTarget } from "../knowledge/path";
 import type { VaultIndexEntry } from "../knowledge/types";
 import type { MarkdownLinkReference } from "../markdown/types";
 import { decodeVaultAsset, safeVaultAssetPreviewKind, type DecodedVaultAsset } from "../vault/vaultAsset";
 import { PUBLISHED_WIKI_LIMITS, type PublishedWikiEntry, type PublishedWikiManifest } from "./publishedWikiTypes";
+import { resolvePublicWikiLink } from "./publicWikiLinkResolution";
 
 interface ReadJob {
   id: string;
@@ -64,9 +65,9 @@ export class PublishedWikiAssetReader {
 
   resolve(reference: MarkdownLinkReference, source: Pick<VaultIndexEntry, "id" | "path">): PublishedWikiEntry | null {
     if (this.signal.aborted || this.scope.aborted || !reference.path || reference.kind === "external" || isExternalLinkTarget(reference.path)) return null;
-    const result = resolveInternalLink({ sourceEntryId: source.id, sourcePath: source.path,
+    const result = resolvePublicWikiLink({ sourceEntryId: source.id, sourcePath: source.path,
       syntax: reference.kind === "wikilink" ? "wikilink" : "markdown", raw: reference.raw, target: reference.path,
-      embedded: true, line: 0, column: 0, context: "" }, this.entries, emptyMetadata, this.index);
+      embedded: true, line: 0, column: 0, context: "" }, this.entries, this.index);
     return result.status === "resolved" && result.candidateEntryIds.length === 1 && result.targetEntryId
       ? this.assets.get(result.targetEntryId) ?? null : null;
   }

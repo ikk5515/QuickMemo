@@ -205,7 +205,7 @@ export function prepareWikiPublication({ rootFolderId, ownerUid, selection, note
       const display = escapedLabel(visibleLabel || published.metadata.title.replace(/\.md$/iu, ""));
       const suffix = fragment ? `#${fragment.startsWith("^") ? "^" : ""}${encodeURIComponent(fragment.replace(/^\^/u, ""))}` : "";
       return syntax === "wikilink"
-        ? `${embed ? "!" : ""}[[${encodedPath(published.path)}${suffix}|${display}]]`
+        ? `${embed ? "!" : ""}[[/${encodedPath(published.path)}${suffix}|${display}]]`
         : `${embed ? "!" : ""}[${display}](<${encodedPath(relativePath(path, published.path))}${suffix}>)`;
     };
     let publicBody = body;

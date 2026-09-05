@@ -1,9 +1,10 @@
 import { sanitizeEditorHtml } from "../../lib/editorContent";
-import { buildInternalLinkResolutionIndex, resolveInternalLink, type InternalLinkResolutionIndex } from "../knowledge/path";
+import { buildInternalLinkResolutionIndex, type InternalLinkResolutionIndex } from "../knowledge/path";
 import type { VaultIndexEntry } from "../knowledge/types";
 import { canonicalSafeExternalHttpUrl } from "../markdown/parser";
 import { vaultEntryPath } from "../vault/vaultData";
 import { rewritePublicationMarkdownLinks, type PublicationMarkdownLink } from "./publicationMarkdown";
+import { resolvePublicWikiLink } from "./publicWikiLinkResolution";
 import { wikiFolderPaths, type WikiReadableFolder, type WikiReadableNote } from "./wikiModel";
 
 const emptyMetadata = new Map<string, { aliases: string[] }>();
@@ -44,10 +45,10 @@ export class WikiPublicProjection {
           if (externalScheme.test(link.target) || link.target.startsWith("//")) return canonicalSafeExternalHttpUrl(link.target) ? link.raw : redact();
           const path = link.target.split("#")[0];
           if (!path && link.target.startsWith("#")) return link.raw;
-          const resolved = resolveInternalLink({ sourceEntryId: note.id, sourcePath: source.path,
+          const resolved = resolvePublicWikiLink({ sourceEntryId: note.id, sourcePath: source.path,
             syntax: path.startsWith("/") ? "wikilink" : link.syntax, target: path, raw: link.raw,
             embedded: link.embed, line: 0, column: 0, context: ""
-          }, this.catalog, emptyMetadata, this.resolutionIndex);
+          }, this.catalog, this.resolutionIndex);
           return resolved.status === "resolved" && resolved.candidateEntryIds.length === 1 ? link.raw : redact();
         };
         try {
