@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { memo, useCallback, useLayoutEffect, useRef } from "react";
-import { undo, redo } from "@codemirror/commands";
+import { undo, redo, historyField } from "@codemirror/commands";
 import { Transaction } from "@codemirror/state";
 import { openSearchPanel } from "@codemirror/search";
 import { MarkdownEditorSessionStore } from "./markdownEditorSession";
@@ -1118,13 +1118,18 @@ describe("CodeMirrorMarkdownEditor", () => {
     act(() => cm.dispatch({ changes: { from: 5, insert: " edited" }, selection: { anchor: 8 }, annotations: Transaction.userEvent.of("input.type") }));
     onChange.mockClear();
     const state = cm.state;
+    const history = state.field(historyField);
     const nextEntries = [...firstEntries, self];
     rendered.rerender(<Workspace entries={nextEntries} metadata={firstMetadata} />);
     expect(screen.queryByRole("button", { name: "E2E Dataview" })).not.toBeInTheDocument();
     rendered.rerender(<Workspace entries={nextEntries} metadata={new Map([...firstMetadata, [self.id, emptyMetadata]])} />);
     expect(await screen.findByRole("button", { name: "E2E Dataview" })).toBeInTheDocument();
     expect(EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))).toBe(cm);
-    expect(cm.state).toBe(state);
+    // Autocompletion may finish its own transaction while Dataview resolves.
+    // Preserve the document, selection and history, not unrelated CM internals.
+    expect(cm.state.doc).toBe(state.doc);
+    expect(cm.state.selection.eq(state.selection)).toBe(true);
+    expect(cm.state.field(historyField)).toBe(history);
     expect(rendered.container.querySelector(".cm-live-complex-block")).toBe(blockHost);
     expect(onChange).not.toHaveBeenCalled();
 
@@ -1133,6 +1138,8 @@ describe("CodeMirrorMarkdownEditor", () => {
     expect(screen.queryByRole("button", { name: "E2E Dataview" })).not.toBeInTheDocument();
     act(() => { undo(cm); });
     expect(cm.state.doc.toString()).toBe(value);
+    act(() => { redo(cm); });
+    expect(cm.state.doc.toString()).toBe(state.doc.toString());
     await act(async () => { rendered.unmount(); await Promise.resolve(); });
     renderBlock.mockClear();
     act(() => updates.refresh());

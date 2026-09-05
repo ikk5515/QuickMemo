@@ -153,3 +153,8 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 - Mobile preference checks passed four repetitions after waiting for the actual responsive state. The final production-code checkpoint then passed all eight combined encrypted-vault and four-document preference cases on Chromium 768/1024 and WebKit 320/390. These retain immediate title entry, exact Markdown, undo/composition, autosave, sidebar persistence, reload and overflow assertions. `/tmp/qm-ci-fix4-mobile.log`, `/tmp/qm-ci-fix6-browser.log`.
 - Independent reviews found no outstanding issue in exact-ciphertext recovery, autofocus behavior or the revised browser assertions. No dependency, security-header, Rule, environment or release-workflow change was introduced by this follow-up.
 - Exact-commit CI/deployment and authenticated production acceptance still require separate evidence.
+
+## Second CI test contract correction
+
+- CI `33965881303` for `62c6725` reported one unit failure (3,451 passed): a Dataview test required the entire `EditorState` object to retain its identity while awaiting live results. The diff showed CodeMirror's ordinary autocomplete completion changing Pending to Inactive after its typing delay, with serialized document/selection unchanged.
+- The test now preserves exact document and history identities, equal selection, the same `EditorView` and block DOM, and zero document-change callbacks. It also verifies undo and redo after live results update. The runtime implementation is unchanged. Independent review confirmed the autocomplete effect in the installed CodeMirror source and no reduction of the document-preservation contract.
