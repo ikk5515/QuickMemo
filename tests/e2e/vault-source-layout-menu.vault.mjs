@@ -1,4 +1,4 @@
-/* global getComputedStyle, URL */
+/* global console, document, getComputedStyle, URL */
 
 import { expect, test } from "@playwright/test";
 import { readVaultEditorSource, saveVaultDocument, openVaultDocumentMenu } from "./vault-editor-helpers.mjs";
@@ -424,48 +424,83 @@ test("desktop workspace controls and dark wikilinks remain deliberate", async ({
   await expect(selectedCompletion).toBeVisible();
   await expect(selectedCompletion).toContainText("새 노트");
 
-  const completionContrast = await selectedCompletion.evaluate((selected) => {
-    const list = selected.closest("ul");
-    if (!list) throw new Error("completion list is unavailable");
-
-    const parseColor = (raw) => {
-      const channels = raw.match(/[\d.]+/gu)?.map(Number) ?? [];
-      if (channels.length < 3) throw new Error(`unable to parse CSS color: ${raw}`);
-      return {
-        red: channels[0],
-        green: channels[1],
-        blue: channels[2],
-        alpha: channels[3] ?? 1
+  let completionColors = null;
+  await expect.poll(async () => {
+    // CM replaces its entire <ul> as asynchronous completions arrive. Resolve
+    // the current row and read its styles in one synchronous browser callback.
+    completionColors = await page.evaluate(() => {
+      const visible = (element) => {
+        if (!element?.isConnected || element.closest('[inert], [aria-hidden="true"]')) return false;
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return bounds.width > 0 && bounds.height > 0
+          && style.display !== "none" && style.visibility === "visible"
+          && element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
       };
-    };
-    const composite = (front, back) => ({
-      red: (front.red * front.alpha) + (back.red * (1 - front.alpha)),
-      green: (front.green * front.alpha) + (back.green * (1 - front.alpha)),
-      blue: (front.blue * front.alpha) + (back.blue * (1 - front.alpha)),
-      alpha: 1
+      const tooltip = [...document.querySelectorAll(
+        ".vault-codemirror-editor > .cm-editor .cm-tooltip.cm-tooltip-autocomplete"
+      )].find(visible);
+      const selected = tooltip?.querySelector('li[aria-selected="true"]');
+      const list = selected?.closest("ul");
+      if (!visible(selected) || !visible(list) || !tooltip.contains(list)
+        || selected.getAttribute("aria-selected") !== "true") return null;
+      const listStyle = getComputedStyle(list);
+      const selectedStyle = getComputedStyle(selected);
+      const colors = {
+        background: selectedStyle.backgroundColor,
+        color: selectedStyle.color,
+        listBackground: listStyle.backgroundColor,
+        text: selected.textContent
+      };
+      return colors.background && colors.color && colors.listBackground ? colors : null;
     });
-    const luminance = (color) => {
-      const linear = [color.red, color.green, color.blue].map((channel) => {
-        const value = channel / 255;
-        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-      });
-      return (linear[0] * 0.2126) + (linear[1] * 0.7152) + (linear[2] * 0.0722);
-    };
+    return completionColors !== null;
+  }, { message: "current visible selected completion styles must be available" }).toBe(true);
 
-    const listStyle = getComputedStyle(list);
-    const selectedStyle = getComputedStyle(selected);
-    const listBackground = parseColor(listStyle.backgroundColor);
-    const rowBackground = composite(parseColor(selectedStyle.backgroundColor), listBackground);
-    const textColor = composite(parseColor(selectedStyle.color), rowBackground);
-    const bright = Math.max(luminance(rowBackground), luminance(textColor));
-    const dark = Math.min(luminance(rowBackground), luminance(textColor));
-    return {
-      background: selectedStyle.backgroundColor,
-      color: selectedStyle.color,
-      listBackground: listStyle.backgroundColor,
-      ratio: (bright + 0.05) / (dark + 0.05)
+  // Only DOM readiness is polled. Unsupported colors or an actual low contrast
+  // ratio fail this one measurement instead of waiting for a more favorable one.
+  const parseColor = (raw) => {
+    const rgb = raw.match(/^rgba?\(\s*(.*?)\s*\)$/iu);
+    const srgb = raw.match(/^color\(\s*srgb\s+(.+?)\s*\)$/iu);
+    if (!rgb && !srgb) throw new Error(`unsupported CSS color: ${raw}`);
+    const channels = (rgb?.[1] ?? srgb[1]).trim().split(/[\s,/]+/u);
+    if (channels.length < 3 || channels.length > 4) throw new Error(`unable to parse CSS color: ${raw}`);
+    const channel = (token, scale) => {
+      if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?%?$/iu.test(token)) {
+        throw new Error(`unsupported CSS color channel: ${raw}`);
+      }
+      const value = Number.parseFloat(token) / (token.endsWith("%") ? 100 : scale);
+      if (!Number.isFinite(value) || value < 0 || value > 1) throw new Error(`CSS color channel is out of range: ${raw}`);
+      return value;
     };
+    return {
+      red: channel(channels[0], srgb ? 1 : 255),
+      green: channel(channels[1], srgb ? 1 : 255),
+      blue: channel(channels[2], srgb ? 1 : 255),
+      alpha: channels[3] === undefined ? 1 : channel(channels[3], 1)
+    };
+  };
+  const composite = (front, back) => ({
+    red: (front.red * front.alpha) + (back.red * (1 - front.alpha)),
+    green: (front.green * front.alpha) + (back.green * (1 - front.alpha)),
+    blue: (front.blue * front.alpha) + (back.blue * (1 - front.alpha)),
+    alpha: 1
   });
+  const luminance = (color) => {
+    const linear = [color.red, color.green, color.blue].map((value) => (
+      value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+    ));
+    return (linear[0] * 0.2126) + (linear[1] * 0.7152) + (linear[2] * 0.0722);
+  };
+  expect(completionColors.text).toContain("새 노트");
+  const listBackground = parseColor(completionColors.listBackground);
+  expect(listBackground.alpha, "completion list must provide an opaque contrast backdrop").toBe(1);
+  const rowBackground = composite(parseColor(completionColors.background), listBackground);
+  const textColor = composite(parseColor(completionColors.color), rowBackground);
+  const bright = Math.max(luminance(rowBackground), luminance(textColor));
+  const dark = Math.min(luminance(rowBackground), luminance(textColor));
+  const completionContrast = { ...completionColors, ratio: (bright + 0.05) / (dark + 0.05) };
+  console.info("completion contrast", JSON.stringify(completionContrast));
   expect(
     completionContrast.ratio,
     `dark completion text must remain readable (${JSON.stringify(completionContrast)})`

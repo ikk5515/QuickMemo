@@ -158,3 +158,9 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 
 - CI `33965881303` for `62c6725` reported one unit failure (3,451 passed): a Dataview test required the entire `EditorState` object to retain its identity while awaiting live results. The diff showed CodeMirror's ordinary autocomplete completion changing Pending to Inactive after its typing delay, with serialized document/selection unchanged.
 - The test now preserves exact document and history identities, equal selection, the same `EditorView` and block DOM, and zero document-change callbacks. It also verifies undo and redo after live results update. The runtime implementation is unchanged. Independent review confirmed the autocomplete effect in the installed CodeMirror source and no reduction of the document-preservation contract.
+
+## Third CI browser measurement correction
+
+- CI `33966270452` for `0f66b43` passed all 3,452 unit tests. The Chromium desktop contrast check read a detached autocomplete row after CodeMirror replaced its list, yielding empty computed styles. It now resolves the currently visible connected row and copies its styles in one synchronous browser callback.
+- Only DOM readiness is polled. The first valid measurement must parse successfully and meet the unchanged 4.5:1 minimum; low contrast is never retried. The parser handles both RGB and CSS `color(srgb ...)` with their respective channel scales and alpha composition.
+- The targeted Chromium desktop 1440px test passed twice, measuring 12.1129:1 each time. Independent review found no assertion weakening. `/tmp/qm-ci-color-targeted.log`. Runtime code is unchanged by this correction; new exact-commit CI and production acceptance remain pending.
