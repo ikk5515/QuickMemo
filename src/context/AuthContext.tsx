@@ -292,8 +292,16 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
       unsubscribe = onAuthStateChanged(auth, (user) => {
         setLoading(true);
-        void loadProfile(user).catch(() => {
-          if (observedFirebaseUidRef.current !== (user?.uid ?? null)) {
+        const profileLoad = loadProfile(user);
+        // loadProfile synchronously observes identity before its first await.
+        // A late rejection must not clear a newer same-UID or provider session.
+        const generation = authGenerationRef.current;
+        void profileLoad.catch(() => {
+          if (
+            !active ||
+            authGenerationRef.current !== generation ||
+            observedFirebaseUidRef.current !== (user?.uid ?? null)
+          ) {
             return;
           }
 

@@ -159,6 +159,57 @@ describe("explicit Vault decryption session", () => {
     expect(mocks.decryptText).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["key", "before"], ["body", "before"], ["key", "after"], ["body", "after"]
+  ] as const)("isolates orphaned pending %s work completing %s its replacement while retaining completed fields", async (stage, completion) => {
+    const session = new VaultDecryptionSession(uid, key);
+    const validNoteKey = {} as CryptoKey;
+    const pendingKey = deferred<CryptoKey>();
+    const pendingBody = deferred<string>();
+    mocks.unwrapNoteKey.mockResolvedValue(validNoteKey);
+    if (stage === "key") {
+      mocks.unwrapNoteKey.mockReturnValueOnce(pendingKey.promise);
+    } else {
+      await session.decryptNoteTitle(note());
+      mocks.decryptText.mockImplementationOnce(() => pendingBody.promise);
+    }
+    const controller = new AbortController();
+    const first = session.decryptNote(note(), controller.signal);
+    const cancelled = expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => stage === "key"
+      ? expect(mocks.unwrapNoteKey).toHaveBeenCalledOnce()
+      : expect(mocks.decryptText).toHaveBeenCalledTimes(2));
+    controller.abort();
+    await cancelled;
+
+    // The old crypto completion can reject after its last waiter has left,
+    // while a new caller arrives before that failure's cache cleanup settles.
+    const finishOldWork = () => {
+      pendingKey.resolve({} as CryptoKey);
+      pendingBody.resolve("discarded old body");
+    };
+    if (completion === "before") {
+      finishOldWork();
+      for (let turn = 0; turn < 3; turn += 1) await Promise.resolve();
+    }
+    const nextController = new AbortController();
+    expect(nextController.signal.aborted).toBe(false);
+    expect(session.matches(uid, key)).toBe(true);
+    await expect(session.decryptNote(note(), nextController.signal)).resolves.toEqual({
+      title: "plain:title-a", body: "plain:body-a"
+    });
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(stage === "key" ? 2 : 1);
+    expect(mocks.decryptText.mock.calls.filter(([value]) => value.cipherText === "title-a")).toHaveLength(1);
+    const cachedSize = [session.stats.entries, session.stats.estimatedBytes];
+    finishOldWork();
+    await vi.waitFor(() => expect(session.stats.activeCrypto).toBe(0));
+    expect([session.stats.entries, session.stats.estimatedBytes]).toEqual(cachedSize);
+    await expect(session.getNoteKey(note(), uid, key)).resolves.toBe(validNoteKey);
+    const cryptoCalls = [mocks.unwrapNoteKey.mock.calls.length, mocks.decryptText.mock.calls.length];
+    await expect(session.decryptNote(note())).resolves.toEqual({ title: "plain:title-a", body: "plain:body-a" });
+    expect([mocks.unwrapNoteKey.mock.calls.length, mocks.decryptText.mock.calls.length]).toEqual(cryptoCalls);
+  });
+
   it("stops a cancelled long list before starting queued fields or further entries", async () => {
     const session = new VaultDecryptionSession(uid, key);
     const pending = deferred<CryptoKey>();
@@ -175,6 +226,43 @@ describe("explicit Vault decryption session", () => {
     await vi.waitFor(() => expect(session.stats.activeCrypto).toBe(0));
     expect(mocks.decryptText).not.toHaveBeenCalled();
     expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(4);
+  });
+
+  it("releases abandoned noncached work without retaining plaintext or blocking its replacement", async () => {
+    const session = new VaultDecryptionSession(uid, key, { maxBytes: 1 });
+    const pending = deferred<CryptoKey>();
+    mocks.unwrapNoteKey.mockReturnValueOnce(pending.promise);
+    const controller = new AbortController();
+    const cancelled = expect(session.decryptNote(note(), controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(mocks.unwrapNoteKey).toHaveBeenCalledOnce());
+    controller.abort();
+    await cancelled;
+    await expect(session.decryptNote(note())).resolves.toEqual({ title: "plain:title-a", body: "plain:body-a" });
+    pending.resolve({} as CryptoKey);
+    await vi.waitFor(() => expect(session.stats).toMatchObject({ activeCrypto: 0, pendingCrypto: 0 }));
+    expect(session.stats).toMatchObject({ entries: 0, estimatedBytes: 0 });
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the four-active and 128-queued limits while reclaiming cancelled crypto slots", async () => {
+    const session = new VaultDecryptionSession(uid, key);
+    const pending = deferred<CryptoKey>();
+    const controller = new AbortController();
+    mocks.unwrapNoteKey.mockReturnValue(pending.promise);
+    const requests = Array.from({ length: 133 }, (_, index) => session.getNoteKey(
+      note({ id: `queued-${index}` }), uid, key, controller.signal
+    ).then(() => "resolved", (error: Error) => error.name));
+    await vi.waitFor(() => expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(4));
+    expect(session.stats).toMatchObject({ activeCrypto: 4, pendingCrypto: 128 });
+    await expect(requests[132]).resolves.toBe("Error");
+    controller.abort();
+    expect((await Promise.all(requests)).slice(0, 132)).toEqual(Array.from({ length: 132 }, () => "AbortError"));
+    pending.resolve({} as CryptoKey);
+    await vi.waitFor(() => expect(session.stats).toMatchObject({ activeCrypto: 0, pendingCrypto: 0 }));
+    expect(mocks.unwrapNoteKey).toHaveBeenCalledTimes(4);
+    expect(mocks.decryptText).not.toHaveBeenCalled();
+    expect(session.stats.estimatedBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    await expect(session.decryptNote(note())).resolves.toEqual({ title: "plain:title-a", body: "plain:body-a" });
   });
 
   it.each(["clear", "dispose"] as const)("%s immediately invalidates pending plaintext and prevents late cache resurrection", async (action) => {

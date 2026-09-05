@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PublicRosterUser, UserKeyDocument, UserProfile } from "../types";
 import { registerPrivateKeyAutoLockGuard } from "../lib/privateKeyAutoLockGuard";
+import { registerUnlockedSessionResource } from "../lib/unlockedSessionResources";
 import { AuthProvider, useAuth } from "./AuthContext";
 
 interface Deferred<T> {
@@ -389,6 +390,115 @@ describe("AuthProvider optimized login", () => {
       expect(currentAuth.privateKey).toBeNull();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("preserves a new same-user session when an earlier profile load rejects", async () => {
+    const oldProfileLoad = deferred<UserProfile | null>();
+    const newProfile = profileFor("user-a");
+    const newPrivateKey = {} as CryptoKey;
+    mocks.getUserProfile.mockReturnValueOnce(oldProfileLoad.promise).mockResolvedValue(newProfile);
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(newPrivateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+
+    mocks.startAuthSession("user-a");
+    mocks.auth.currentUser = userA;
+    act(() => mocks.emitAuthState(userA));
+    await waitFor(() => expect(mocks.getUserProfile).toHaveBeenCalledOnce());
+    await act(async () => { await currentAuth.signOut(); });
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    expect(currentAuth.profile).toBe(newProfile);
+    expect(currentAuth.privateKey).toBe(newPrivateKey);
+    const disposeNewResource = vi.fn();
+    const unregister = registerUnlockedSessionResource(disposeNewResource);
+    try {
+      await act(async () => { oldProfileLoad.reject(new Error("delayed old load failure")); });
+      expect(currentAuth.firebaseUser).toBe(userA);
+      expect(currentAuth.profile).toBe(newProfile);
+      expect(currentAuth.privateKey).toBe(newPrivateKey);
+      expect(currentAuth.loading).toBe(false);
+      expect(disposeNewResource).not.toHaveBeenCalled();
+      expect(mocks.firebaseSignOut).toHaveBeenCalledOnce();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("does not dispose a replacement provider's unlocked resources after an old load rejects", async () => {
+    const oldProfileLoad = deferred<UserProfile | null>();
+    const newProfile = profileFor("user-a");
+    const newPrivateKey = {} as CryptoKey;
+    mocks.getUserProfile.mockReturnValueOnce(oldProfileLoad.promise).mockResolvedValue(newProfile);
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(newPrivateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    const previous = render(<AuthProvider><AuthHarness /></AuthProvider>);
+    await waitFor(() => expect(mocks.onAuthStateChanged).toHaveBeenCalledOnce());
+    mocks.startAuthSession("user-a");
+    mocks.auth.currentUser = userA;
+    act(() => mocks.emitAuthState(userA));
+    await waitFor(() => expect(mocks.getUserProfile).toHaveBeenCalledOnce());
+    previous.unmount();
+    render(<AuthProvider><AuthHarness /></AuthProvider>);
+    await waitFor(() => expect(mocks.onAuthStateChanged).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    expect(currentAuth.profile).toBe(newProfile);
+    expect(currentAuth.privateKey).toBe(newPrivateKey);
+    const disposeNewResource = vi.fn();
+    const unregister = registerUnlockedSessionResource(disposeNewResource);
+    try {
+      await act(async () => { oldProfileLoad.reject(new Error("unmounted provider load failure")); });
+      expect(currentAuth.profile).toBe(newProfile);
+      expect(currentAuth.privateKey).toBe(newPrivateKey);
+      expect(disposeNewResource).not.toHaveBeenCalled();
+      expect(mocks.firebaseSignOut).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+
+  it("still clears unlocked resources when the current profile load rejects", async () => {
+    const currentProfileLoad = deferred<UserProfile | null>();
+    mocks.getUserProfile.mockResolvedValue(profileFor("user-a"));
+    mocks.getUserKeyDocument.mockResolvedValue(keyDocument);
+    mocks.unlockPrivateKeyWithFallback.mockResolvedValue(privateKey);
+    mocks.signInWithEmailAndPassword.mockImplementation(async () => {
+      mocks.auth.currentUser = userA;
+      mocks.emitAuthState(userA);
+      return { user: userA };
+    });
+    await renderAuthProvider();
+    await act(async () => {
+      await currentAuth.loginRosterUser(rosterFor("user-a"), "password");
+    });
+    expect(currentAuth.privateKey).toBe(privateKey);
+    mocks.getUserProfile.mockReturnValueOnce(currentProfileLoad.promise);
+    const disposeResource = vi.fn();
+    const unregister = registerUnlockedSessionResource(disposeResource);
+    try {
+      act(() => mocks.emitAuthState(userA));
+      await waitFor(() => expect(mocks.getUserProfile).toHaveBeenCalledTimes(2));
+      await act(async () => { currentProfileLoad.reject(new Error("current load failure")); });
+      expect(currentAuth.profile).toBeNull();
+      expect(currentAuth.privateKey).toBeNull();
+      expect(currentAuth.loading).toBe(false);
+      expect(disposeResource).toHaveBeenCalledOnce();
+    } finally {
+      unregister();
     }
   });
 

@@ -11,6 +11,7 @@ type FieldName = "title" | "body" | "name";
 interface CachedField {
   payload: EncryptedPayload;
   promise: Promise<string>;
+  pending: boolean;
   bytes: number;
 }
 interface CachedEntry {
@@ -227,6 +228,34 @@ export class VaultDecryptionSession {
     }
   }
 
+  private retireUnusedPendingWork(entry: CachedEntry, epoch: AbortSignal) {
+    if (entry.consumers !== 0) return;
+    const pendingFields = [...entry.fields.values()].filter((field) => field.pending);
+    if (!pendingFields.length && (!entry.keyPromise || entry.key)) return;
+    const key = entry.key;
+    const fields = new Map([...entry.fields].filter(([, field]) => !field.pending));
+    const bytes = entry.bytes - pendingFields.reduce((total, field) => total + field.bytes, 0);
+    const cached = this.entries.get(entry.id) === entry;
+    const retainCompleted = cached && !epoch.aborted && !entry.controller.signal.aborted
+      && this.uid !== null && this.privateKey !== null;
+    if (cached) {
+      this.remove(entry.id);
+    } else {
+      entry.controller.abort(abortError());
+      entry.fields.clear();
+      entry.key = null;
+      entry.keyPromise = null;
+    }
+    // Completed crypto remains reusable, but abandoned promises belong to the
+    // old controller and can never reject into or mutate a new consumer's work.
+    if (retainCompleted && (key || fields.size)) {
+      this.entries.set(entry.id, {
+        ...entry, controller: new AbortController(), fields, key, keyPromise: null, bytes
+      });
+      this.estimatedBytes += bytes;
+    }
+  }
+
   private adjustBytes(entry: CachedEntry, difference: number) {
     entry.bytes += difference;
     if (this.entries.get(entry.id) === entry) this.estimatedBytes += difference;
@@ -283,7 +312,7 @@ export class VaultDecryptionSession {
     if (previous) this.adjustBytes(entry, -previous.bytes);
     const field: CachedField = {
       payload: { ...payload }, bytes: 2 * (payload.cipherText.length + payload.iv.length),
-      promise: Promise.resolve("")
+      promise: Promise.resolve(""), pending: true
     };
     entry.fields.set(name, field);
     this.adjustBytes(entry, field.bytes);
@@ -291,6 +320,7 @@ export class VaultDecryptionSession {
       .then((key) => this.schedule(entry, epoch, () => decryptText(field.payload, key)))
       .then((plaintext) => {
         this.assertCurrent(entry, epoch);
+        field.pending = false;
         if (entry.fields.get(name) === field) {
           field.bytes += plaintext.length * 2;
           this.adjustBytes(entry, plaintext.length * 2);
@@ -317,6 +347,7 @@ export class VaultDecryptionSession {
       return value;
     } finally {
       entry.consumers -= 1;
+      this.retireUnusedPendingWork(entry, epoch);
       this.trim();
     }
   }
