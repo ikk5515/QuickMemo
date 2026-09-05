@@ -599,11 +599,32 @@ async function recoverExpiredPendingTestReservation(
       { deliveryAmbiguous: true },
       now.getTime()
     );
-    const quotaWrites = await finalizedEmailTestQuotaWrites(
-      user.context,
-      pending.testQuotaBucketIds,
-      "ambiguous"
-    );
+    let quotaWrites;
+    try {
+      quotaWrites = await finalizedEmailTestQuotaWrites(
+        user.context,
+        pending.testQuotaBucketIds,
+        "ambiguous"
+      );
+    } catch (error) {
+      if (!(error instanceof EmailTestQuotaSnapshotConflict)) {
+        throw error;
+      }
+      const latest = await currentSettings(user.context);
+      if (
+        typeof current?.__updateTime !== "string"
+        || typeof latest?.__updateTime !== "string"
+        || latest?.__updateTime === current.__updateTime
+      ) {
+        throw new HttpError(
+          503,
+          "email_settings_unavailable",
+          "Email quota accounting underflow"
+        );
+      }
+      current = latest;
+      continue;
+    }
     const recoveredPending = {
       ...pending,
       testState: "ambiguous",

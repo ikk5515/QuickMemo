@@ -163,9 +163,13 @@
   list-style: none;
 }
 
-.qm-markdown-task input {
+.qm-markdown-task > input[type="checkbox"] {
   grid-column: 1;
-  margin-top: 0.45em;
+  width: 1em;
+  height: 1em;
+  min-height: 0;
+  padding: 0;
+  margin: calc((1lh - 1em) / 2) 0 0;
 }
 
 .qm-markdown-task > :not(input) {

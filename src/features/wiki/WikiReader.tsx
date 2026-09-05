@@ -464,14 +464,21 @@ function WikiOutline({ nodes, activeSlug, onSelect }: { nodes: readonly WikiOutl
 
 function WikiGraphDialog({ children, onClose }: { children: ReactNode; onClose: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const close = () => {
+    // Release the native modal's inert background before restoring opener focus.
+    const dialog = ref.current;
+    if (typeof dialog?.close === "function") dialog.close();
+    else dialog?.removeAttribute("open");
+    onClose();
+  };
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
     if (typeof dialog.showModal === "function") dialog.showModal(); else dialog.setAttribute("open", "");
     return () => { if (typeof dialog.close === "function") dialog.close(); };
   }, []);
-  return <dialog aria-label="위키 그래프 크게 보기" className="wiki-graph-dialog" onCancel={(event) => { event.preventDefault(); onClose(); }} ref={ref}>
-    <div className="wiki-graph-dialog-header"><h2>INTERACTIVE GRAPH</h2><button aria-label="그래프 닫기" className="wiki-icon-button" onClick={onClose} type="button"><X aria-hidden="true" size={20} /></button></div>
+  return <dialog aria-label="위키 그래프 크게 보기" className="wiki-graph-dialog" onCancel={(event) => { event.preventDefault(); close(); }} ref={ref}>
+    <div className="wiki-graph-dialog-header"><h2>INTERACTIVE GRAPH</h2><button aria-label="그래프 닫기" className="wiki-icon-button" onClick={close} type="button"><X aria-hidden="true" size={20} /></button></div>
     {children}
   </dialog>;
 }
