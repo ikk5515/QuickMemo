@@ -9,7 +9,12 @@ import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 
 async function explorer(page) {
   const panel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
-  if (!(await panel.isVisible())) await page.getByRole("button", { name: "파일", exact: true }).click();
+  const toggle = page.locator('.vault-ribbon button[aria-controls="vault-left-panel"][aria-expanded]');
+  // Wait for the unlocked workspace and restored layout before reading drawer state.
+  // An open phone drawer makes the ribbon inert; absence during loading is not closed.
+  await expect(toggle).toBeAttached();
+  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending|conflict)$/);
+  if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
   await expect(panel).toBeVisible(); return panel;
 }
 async function createNote(page, title, body) {
