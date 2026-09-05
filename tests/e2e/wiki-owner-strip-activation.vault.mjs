@@ -17,12 +17,18 @@ test("owner collapsed strip activates the requested retained editor and saves to
     await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending|conflict)$/u);
     if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
     const create = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]').getByRole("button", { name: "새 노트", exact: true });
+    const activeTab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
+    const previousTabId = await activeTab.count() ? await activeTab.getAttribute("id") : null;
     await expect(create).toBeEnabled({ timeout: 30_000 }); await create.click();
+    await expect(activeTab).toHaveAttribute("id", /^entry:/u);
+    if (previousTabId) await expect(activeTab).not.toHaveAttribute("id", previousTabId);
     await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill(title);
     const body = title.endsWith("C") ? Array.from({ length: 80 }, (_, index) => `## Long section ${index}\n\nSynthetic long document paragraph ${index}.`).join("\n\n") : `## ${title}\n\n${title} original body`;
     await page.getByRole("textbox", { name: "Markdown 편집기", exact: true }).fill(body);
     await saveVaultDocument(page, { allowClean: true });
-    const tabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
+    await expect(activeTab).toHaveText(title);
+    expect(await readVaultEditorSource(page.getByRole("textbox", { name: "Markdown 편집기", exact: true }))).toBe(body);
+    const tabId = await activeTab.getAttribute("id");
     expect(tabId).toMatch(/^entry:/u); ids.set(title, tabId.slice("entry:".length));
   }
   expect(new Set(ids.values()).size, "Every created title must have a distinct source note ID").toBe(titles.length);

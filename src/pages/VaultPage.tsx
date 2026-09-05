@@ -321,6 +321,7 @@ import {
   type VaultPersistedWorkspaceState
 } from "../features/vault/workspaceState";
 import { resolveAlreadyPersistedWorkspaceSave } from "../features/vault/workspaceSaveQueue";
+import { useWorkspaceSaveSession } from "../features/vault/useWorkspaceSaveSession";
 import {
   subscribeNoteFolders,
   subscribeDeletedNoteFolders,
@@ -2025,6 +2026,7 @@ function UnlockedVaultPage({
   const handledWorkspaceRouteIntentRef = useRef<string | null>(null);
   const initialEntryAutoOpenPendingRef = useRef(false);
   const workspaceRevisionRef = useRef<number | undefined>(undefined);
+  const workspaceSaveSession = useWorkspaceSaveSession(profile.uid, privateKey, workspaceRevisionRef);
   const lastSavedWorkspaceRef = useRef("");
   const latestWorkspaceStateRef = useRef<VaultPersistedWorkspaceState>(createDefaultVaultWorkspaceState());
   const globalViewportRef = useRef(globalViewport);
@@ -4820,6 +4822,8 @@ function UnlockedVaultPage({
     pendingWorkspaceStateRef.current = persistedWorkspace;
     setWorkspaceSavePending(true);
     const saveGeneration = workspaceSaveGenerationRef.current;
+    const saveSession = workspaceSaveSession.capture();
+    if (!saveSession) return undefined;
     const timer = window.setTimeout(() => {
       if (workspaceSaveDebounceTimerRef.current === timer) {
         workspaceSaveDebounceTimerRef.current = null;
@@ -4827,6 +4831,7 @@ function UnlockedVaultPage({
       const saveTask = workspaceSaveChainRef.current.then(async () => {
         if (
           workspaceSaveGenerationRef.current !== saveGeneration
+          || !workspaceSaveSession.isCurrent(saveSession)
           || workspaceConflictPendingRef.current
         ) {
           return;
@@ -4847,10 +4852,12 @@ function UnlockedVaultPage({
           persistedWorkspace as unknown as VaultWorkspaceState,
           workspaceRevisionRef.current
         );
-        if (workspaceSaveGenerationRef.current !== saveGeneration) {
+        // Keep only this active crypto session's numeric receipt when an ACL
+        // cleanup invalidated the old layout while its write was completing.
+        const acknowledged = workspaceSaveSession.acknowledge(saveSession, result.revision);
+        if (!acknowledged || workspaceSaveGenerationRef.current !== saveGeneration) {
           return;
         }
-        workspaceRevisionRef.current = result.revision;
         lastSavedWorkspaceRef.current = serialized;
         setLastSavedWorkspaceSerialization(serialized);
         if (pendingWorkspaceStateRef.current === persistedWorkspace) {
@@ -4862,7 +4869,7 @@ function UnlockedVaultPage({
         );
       });
       workspaceSaveChainRef.current = saveTask.catch((caught) => {
-        if (workspaceSaveGenerationRef.current !== saveGeneration) {
+        if (workspaceSaveGenerationRef.current !== saveGeneration || !workspaceSaveSession.isCurrent(saveSession)) {
           return;
         }
         if (caught instanceof VaultWorkspaceRevisionConflictError) {
@@ -4879,6 +4886,7 @@ function UnlockedVaultPage({
             .then((record) => {
               if (
                 workspaceSaveGenerationRef.current !== saveGeneration
+                || !workspaceSaveSession.isCurrent(saveSession)
                 || workspaceConflictRequestGenerationRef.current !== conflictRequestGeneration
               ) return;
               setWorkspaceConflict({
@@ -4895,6 +4903,7 @@ function UnlockedVaultPage({
             .catch(() => {
               if (
                 workspaceSaveGenerationRef.current === saveGeneration
+                && workspaceSaveSession.isCurrent(saveSession)
                 && workspaceConflictRequestGenerationRef.current === conflictRequestGeneration
               ) {
                 setWorkspaceConflict({
@@ -4909,7 +4918,7 @@ function UnlockedVaultPage({
           setError("암호화 워크스페이스 상태를 저장하지 못했습니다. 노트 본문 저장에는 영향을 주지 않습니다.");
           workspaceSaveRetryTimerRef.current = window.setTimeout(() => {
             workspaceSaveRetryTimerRef.current = null;
-            if (workspaceSaveGenerationRef.current === saveGeneration) {
+            if (workspaceSaveGenerationRef.current === saveGeneration && workspaceSaveSession.isCurrent(saveSession)) {
               setWorkspaceSaveRetry((attempt) => attempt + 1);
             }
           }, 3_000);
@@ -4962,6 +4971,7 @@ function UnlockedVaultPage({
     workspaceLayout,
     workspaceReady,
     workspaceConflict,
+    workspaceSaveSession,
     workspaceSaveRetry
   ]);
 
@@ -5587,21 +5597,27 @@ function UnlockedVaultPage({
       return window.confirm("오프라인이라 마지막 탭·패널 배치를 서버에 저장할 수 없습니다. 노트 편집본과 현재 배치는 이 세션에만 남습니다. 그래도 이동할까요?");
     }
     const saveGeneration = workspaceSaveGenerationRef.current;
+    const saveSession = workspaceSaveSession.capture();
+    if (!saveSession) return false;
     try {
       const flushResult = await flushLatestWorkspaceState({
         getCurrentState: () => latestWorkspaceStateRef.current,
         getLastSavedSerialization: () => lastSavedWorkspaceRef.current,
         save: async (latest, serialized) => {
           const saveTask = workspaceSaveChainRef.current.then(async () => {
-            if (workspaceConflictPendingRef.current) return false;
+            if (
+              workspaceSaveGenerationRef.current !== saveGeneration
+              || !workspaceSaveSession.isCurrent(saveSession)
+              || workspaceConflictPendingRef.current
+            ) return false;
             const result = await saveVaultWorkspace(
               profile,
               privateKey,
               latest as unknown as VaultWorkspaceState,
               workspaceRevisionRef.current
             );
-            if (workspaceSaveGenerationRef.current !== saveGeneration) return false;
-            workspaceRevisionRef.current = result.revision;
+            const acknowledged = workspaceSaveSession.acknowledge(saveSession, result.revision);
+            if (!acknowledged || workspaceSaveGenerationRef.current !== saveGeneration) return false;
             lastSavedWorkspaceRef.current = serialized;
             setLastSavedWorkspaceSerialization(serialized);
             const pending = pendingWorkspaceStateRef.current;
@@ -5620,6 +5636,7 @@ function UnlockedVaultPage({
           }
         }
       });
+      if (workspaceSaveGenerationRef.current !== saveGeneration || !workspaceSaveSession.isCurrent(saveSession)) return false;
       if (!flushResult.stable) {
         setError("탭·패널 배치가 계속 변경되어 최신 상태 저장을 확인하지 못했습니다. 잠시 후 다시 이동해주세요.");
         return false;
@@ -5630,6 +5647,7 @@ function UnlockedVaultPage({
       }
       return !workspaceConflictPendingRef.current;
     } catch (caught) {
+      if (workspaceSaveGenerationRef.current !== saveGeneration || !workspaceSaveSession.isCurrent(saveSession)) return false;
       if (caught instanceof VaultWorkspaceRevisionConflictError) {
         workspaceConflictPendingRef.current = true;
         const requestGeneration = workspaceConflictRequestGenerationRef.current + 1;
@@ -5642,7 +5660,11 @@ function UnlockedVaultPage({
         setError("다른 탭의 워크스페이스 배치와 충돌했습니다. 어느 쪽도 덮어쓰지 않았습니다.");
         void loadVaultWorkspaceRecord<VaultWorkspaceState>(profile.uid, privateKey)
           .then((record) => {
-            if (workspaceConflictRequestGenerationRef.current !== requestGeneration) return;
+            if (
+              workspaceSaveGenerationRef.current !== saveGeneration
+              || !workspaceSaveSession.isCurrent(saveSession)
+              || workspaceConflictRequestGenerationRef.current !== requestGeneration
+            ) return;
             setWorkspaceConflict({
               actualRevision: record?.revision ?? caught.actualRevision,
               localState: latestWorkspaceStateRef.current,

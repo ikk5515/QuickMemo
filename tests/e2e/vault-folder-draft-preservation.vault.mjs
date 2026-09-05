@@ -32,6 +32,9 @@ test("remote folder trash preserves an unrelated authorized dirty draft", async 
   const savedRows = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   expect(savedRows.find((note) => note.id === keptId)?.folderId ?? null).toBeNull();
   expect(savedRows.find((note) => note.id === hiddenId)?.folderId).toBeTruthy();
+  // Establish the fixture's persisted layout before a second session loads it.
+  // Initial layout creation is separate from the folder-revocation race below.
+  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved");
 
   const context = await browser.newContext({ baseURL: "http://127.0.0.1:4174", locale: "ko-KR", viewport: { width: 1280, height: 720 } });
   const editing = await context.newPage();
@@ -43,6 +46,7 @@ test("remote folder trash preserves an unrelated authorized dirty draft", async 
     await loginDirectly(editing, fixture.viewerAuth, editingDiagnostics);
     await navigateWithinApp(editing, `/app?entry=${encodeURIComponent(keptId)}`);
     await expect(editing.getByLabel("노트 이름")).toHaveValue("유지할 메모");
+    await expect(editing.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved");
 
     // Hold only this fixture's writes so the remote folder snapshot arrives
     // while its draft is definitely unsaved, independent of CI machine speed.

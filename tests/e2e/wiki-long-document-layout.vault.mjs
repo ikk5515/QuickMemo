@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { strToU8, zipSync } from "fflate";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime,
-  loginDirectly, navigateWithinApp, observePage, seedScenario
+  loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario
 } from "./helpers.mjs";
 import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
@@ -16,14 +16,18 @@ async function createMemo(page, title, body) {
   await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending)$/);
   if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
   const create = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]').getByRole("button", { name: "새 노트", exact: true });
+  const tab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
+  const previousTabId = await tab.count() ? await tab.getAttribute("id") : null;
   await expect(create).toBeEnabled(); await create.click();
+  await expect(tab).toHaveAttribute("id", /^entry:/u);
+  if (previousTabId) await expect(tab).not.toHaveAttribute("id", previousTabId);
   await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill(title);
   const editor = page.getByRole("textbox", { name: "Markdown 편집기", exact: true });
   await expect(editor).toBeEditable(); await editor.fill(body);
   await saveVaultDocument(page, { allowClean: true });
   await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(title);
-  const tab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
   await expect(tab).toHaveText(title);
+  expect(await readVaultEditorSource(editor)).toBe(body);
   const tabId = await tab.getAttribute("id");
   expect(tabId).toMatch(/^entry:/u);
   return tabId.slice("entry:".length);
@@ -94,6 +98,10 @@ test("long retained Wiki documents stay within the desktop workspace and keep in
     const title = letter === "C" ? "긴 문서 C" : `짧은 문서 ${letter}`;
     entries.push({ id: await createMemo(page, title, letter === "C" ? longBody : `# ${title}\n\n독립 문서 ${letter}`), title });
   }
+  expect(new Set(entries.map((entry) => entry.id)).size, "Every editor fixture must be a distinct saved note").toBe(4);
+  await expect.poll(async () => (await ownedVaultNotesState(request, fixture.viewerAuth.uid)).map((note) => note.id).sort(), {
+    message: "The server must contain all four saved editor fixtures before importing"
+  }).toEqual(entries.map((entry) => entry.id).sort());
   // A real encrypted import supplies the long sidebar that previously made the
   // auto grid row exceed its fixed-height parent. No test-only DOM/CSS is used.
   const archive = zipSync(Object.fromEntries(Array.from({ length: 56 }, (_, index) => {
@@ -107,6 +115,9 @@ test("long retained Wiki documents stay within the desktop workspace and keep in
   page.once("dialog", (dialog) => dialog.accept());
   await (await choosing).setFiles({ name: "long-wiki-sidebar.zip", mimeType: "application/zip", buffer: Buffer.from(archive) });
   await expect(page.getByText("56개 항목을 암호화해 가져왔습니다.", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect.poll(async () => (await ownedVaultNotesState(request, fixture.viewerAuth.uid)).length, {
+    message: "All 56 imported notes and four editor fixtures must exist before checking navigation"
+  }).toBe(60);
   await navigateWithinApp(page, `/wiki?note=${entries[0].id}`);
   await expect(page.getByRole("main", { name: "위키 읽기 패널", exact: true })).toBeVisible();
   await expect.poll(() => page.locator(".wiki-navigation .wiki-note-link").count()).toBeGreaterThanOrEqual(60);
