@@ -48,7 +48,7 @@ describe("public projection and image resolution share the exact published catal
   it("reads an existing bare canonical root PNG from a nested note without republishing", async () => {
     const original = `![[${encodedFilename}|${filename}]]\n\n# F`;
     const projected = project(original);
-    expect(projected).toBe(original);
+    expect(projected).toBe(`![[/${encodedFilename}|${filename}]]\n\n# F`);
     const reader = new PublishedWikiAssetReader(manifest(), new AbortController().signal);
     const selected = reader.resolve(parsedEmbed(projected), sourceEntry);
     expect(selected).toEqual(image);
@@ -109,13 +109,19 @@ describe("public projection and image resolution share the exact published catal
 
   it("clears the projected embed when its exact selected asset is removed and refuses nonselected IDs", async () => {
     const projection = new WikiPublicProjection(); const original = `![[${encodedFilename}|hidden label]]`;
-    expect(project(original, [sourceEntry, image], projection)).toBe(original);
+    expect(project(original, [sourceEntry, image], projection)).toBe(`![[/${encodedFilename}|hidden label]]`);
     expect(project(original, [sourceEntry], projection)).toBe("[비공개 첨부]");
     const reader = new PublishedWikiAssetReader(manifest([sourceEntry]), new AbortController().signal);
     expect(reader.resolve(reference(encodedFilename), sourceEntry)).toBeNull();
     await expect(reader.load("original-image", new AbortController().signal)).rejects.toThrow("outside the public scope");
     await expect(reader.load(image.id, new AbortController().signal)).rejects.toThrow("outside the public scope");
     expect(getAsset).not.toHaveBeenCalled(); reader.dispose();
+  });
+
+  it.each(["#Heading", "#^block", "#%5Eblock"])("preserves aliases, encoded filenames and fragment %s when canonicalizing a legacy display copy", (fragment) => {
+    const original = `![[  ${encodedFilename}${fragment}|표시 이름]]`;
+    expect(project(original)).toBe(`![[  /${encodedFilename}${fragment}|표시 이름]]`);
+    expect(original).toBe(`![[  ${encodedFilename}${fragment}|표시 이름]]`);
   });
 
   it("does not fall back for Markdown-relative links, partial filenames, or duplicate root paths", () => {

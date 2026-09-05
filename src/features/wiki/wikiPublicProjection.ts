@@ -49,7 +49,12 @@ export class WikiPublicProjection {
             syntax: path.startsWith("/") ? "wikilink" : link.syntax, target: path, raw: link.raw,
             embedded: link.embed, line: 0, column: 0, context: ""
           }, this.catalog, this.resolutionIndex);
-          return resolved.status === "resolved" && resolved.candidateEntryIds.length === 1 ? link.raw : redact();
+          if (resolved.status !== "resolved" || resolved.candidateEntryIds.length !== 1) return redact();
+          // Old published root filenames were bare. Once their exact root
+          // fallback is verified, preserve that meaning in the display/index
+          // copy too, so links, graph and backlinks share the same target.
+          return resolved.target !== path && link.syntax === "wikilink"
+            ? link.raw.replace(/^(!?\[\[)(\s*)/u, "$1$2/") : link.raw;
         };
         try {
           if (note.contentFormat === "legacy-html-v1") {

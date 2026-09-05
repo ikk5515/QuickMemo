@@ -122,7 +122,9 @@ function pathVariants(target: string, syntax: InternalLinkOccurrence["syntax"], 
     }
   };
 
-  if (syntax === "markdown" || decoded.startsWith("./") || decoded.startsWith("../")) {
+  if (decoded.startsWith("/")) {
+    add(decoded);
+  } else if (syntax === "markdown" || decoded.startsWith("./") || decoded.startsWith("../")) {
     add(sourceDirectory ? `${sourceDirectory}/${decoded}` : decoded);
   } else {
     if (!decoded.includes("/")) {

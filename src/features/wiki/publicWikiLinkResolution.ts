@@ -25,5 +25,5 @@ export function resolvePublicWikiLink(
   const root = resolveInternalLink({ ...occurrence, target: `/${occurrence.target.trim()}` }, entries, emptyMetadata, index);
   return root.status === "resolved" && root.candidateEntryIds.length === 1
     && root.targetPath?.normalize("NFC") === decoded.normalize("NFC")
-    ? { ...root, ...occurrence } : normal;
+    ? root : normal;
 }

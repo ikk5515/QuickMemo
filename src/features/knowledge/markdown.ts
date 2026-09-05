@@ -358,7 +358,7 @@ function splitTargetFragment(rawTarget: string): { target: string; fragment?: In
 }
 
 function normalizeLinkTarget(target: string): string {
-  return target.trim().replace(/\\/g, "/").replace(/^\/+/, "");
+  return target.trim().replace(/\\/g, "/");
 }
 
 function parseLinks(
