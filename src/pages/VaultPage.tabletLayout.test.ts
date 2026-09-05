@@ -54,7 +54,7 @@ describe("Vault tablet sidebar layout contract", () => {
     ]));
   });
 
-  it("keeps enough portrait-tablet canvas width while both sidebars are docked", () => {
+  it("reserves a 280px editor before growing the portrait-tablet left sidebar", () => {
     const compactStart = styles.indexOf("@media (min-width: 761px) and (max-width: 900px) {");
     const splitStart = styles.indexOf("@media (min-width: 761px) and (max-width: 1023px) {", compactStart);
     const compactStyles = styles.slice(compactStart, splitStart);
@@ -62,7 +62,7 @@ describe("Vault tablet sidebar layout contract", () => {
     expect(compactStart).toBeGreaterThanOrEqual(0);
     expect(splitStart).toBeGreaterThan(compactStart);
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(150px, 170px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
+      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(150px, 170px\) minmax\(280px, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace.vault-left-closed")).toEqual(expect.arrayContaining([
       expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)

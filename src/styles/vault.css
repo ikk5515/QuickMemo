@@ -2417,7 +2417,7 @@
 
 @media (min-width: 761px) and (max-width: 900px) {
   .vault-workspace {
-    grid-template-columns: var(--vault-rail-size) minmax(150px, 170px) minmax(0, 1fr) var(--vault-right-panel-size);
+    grid-template-columns: var(--vault-rail-size) minmax(150px, 170px) minmax(280px, 1fr) var(--vault-right-panel-size);
   }
 
   .vault-workspace.vault-left-closed {

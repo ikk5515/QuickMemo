@@ -56,6 +56,11 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
   await loginDirectly(page, fixture.viewerAuth, diagnostics);
   await navigateWithinApp(page, "/app");
   const workspace = page.locator(".vault-workspace");
+  if (page.viewportSize()?.width === 768) {
+    // Linux reserves a 15px scrollbar gutter. Exercise that available width
+    // on overlay-scrollbar platforms too, while retaining the tablet layout.
+    await workspace.evaluate((element) => { element.style.maxWidth = "753px"; });
+  }
   await expect(page.getByLabel("Vault 이름 무결성 준비")).toHaveCount(0, { timeout: 35_000 });
   await expect(workspace).toHaveAttribute("data-workspace-sync", "saved", { timeout: 35_000 });
   const panel = await openRightPanel(page, { keepLeftOpen: !mobileLayout });
@@ -178,7 +183,11 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
       await page.mouse.up();
     }
     const draggedWidth = Number(await separator.getAttribute("aria-valuenow"));
-    expect(draggedWidth).toBeGreaterThan(250);
+    if (maximumWidth === 250) {
+      expect(draggedWidth, "Dragging must preserve the editor when the right panel has no room to grow").toBe(250);
+    } else {
+      expect(draggedWidth).toBeGreaterThan(250);
+    }
     expect(draggedWidth).toBeLessThanOrEqual(maximumWidth);
     await page.waitForTimeout(900);
     await expect(workspace).toHaveAttribute("data-workspace-sync", "saved");
