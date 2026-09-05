@@ -148,6 +148,19 @@ describe("RequireAuth feature access", () => {
     expect(screen.getByText("보호된 기능")).toBeInTheDocument();
   });
 
+  it.each([
+    { isActive: false },
+    { uid: "previous-user" },
+    { isActive: false, isAdmin: true, role: "admin" as const }
+  ])("blocks inactive or stale account profiles before mounting protected pages: %o", (overrides) => {
+    authState.profile = profile(overrides);
+
+    renderGuard("notes");
+
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+    expect(screen.queryByText("보호된 기능")).not.toBeInTheDocument();
+  });
+
   it("redirects a denied direct feature URL to the safe home", () => {
     authState.profile = profile({
       featureAccess: { notes: true, library: false, schedule: true }

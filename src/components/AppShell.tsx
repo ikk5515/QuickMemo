@@ -6,8 +6,6 @@ import {
   LogOut,
   Menu,
   Moon,
-  Network,
-  Search,
   Settings,
   Shield,
   Sun,
@@ -58,28 +56,19 @@ import type {
 } from "../types";
 import { AppSelect } from "./AppSelect";
 
-type WorkspaceSection = "files" | "search" | "graph" | "library" | "schedule" | "admin";
-type WorkspacePanelIntent = Extract<WorkspaceSection, "files" | "search">;
+type WorkspacePanelIntent = "files" | "search";
+type WorkspaceSection = "files" | "library" | "schedule" | "admin";
 
 interface WorkspaceNavigationItem {
-  disabled?: boolean;
   href: string;
   icon: LucideIcon;
   label: string;
   section: WorkspaceSection;
-  unavailableHint?: string;
 }
 
-const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
-
-function workspaceSectionFromLocation(pathname: string, search: string): WorkspaceSection | null {
-  const params = new URLSearchParams(search);
-
+function workspaceSectionFromLocation(pathname: string): WorkspaceSection | null {
   if (pathname === "/app" || pathname === "/app/legacy") {
-    if (pathname === "/app" && obsidianVaultEnabled && params.get("view") === "graph") {
-      return "graph";
-    }
-    return params.get("panel") === "search" ? "search" : "files";
+    return "files";
   }
   if (pathname === "/library") {
     return "library";
@@ -132,31 +121,17 @@ export function AppShell({
     () => profile && privateKey ? { privateKey, profile } : undefined,
     [privateKey, profile]
   );
-  const activeWorkspaceSection = workspaceSectionFromLocation(location.pathname, location.search);
+  const activeWorkspaceSection = workspaceSectionFromLocation(location.pathname);
   const navigationItems: WorkspaceNavigationItem[] = [];
 
   if (featureAccess.notes) {
-    navigationItems.push(
-      { href: "/app?panel=files", icon: Files, label: "파일 탐색기", section: "files" },
-      { href: "/app?panel=search", icon: Search, label: "노트 검색", section: "search" },
-      {
-        disabled: !obsidianVaultEnabled,
-        href: "/app?view=graph",
-        icon: Network,
-        label: "그래프 보기",
-        section: "graph",
-        unavailableHint: "암호화 Vault의 운영 검증이 끝난 뒤 사용할 수 있습니다."
-      }
-    );
+    navigationItems.push({ href: "/app?panel=files", icon: Files, label: "메모", section: "files" });
+  }
+  if (featureAccess.schedule) {
+    navigationItems.push({ href: "/schedule", icon: CalendarDays, label: "일정", section: "schedule" });
   }
   if (featureAccess.library) {
     navigationItems.push({ href: "/library", icon: LibraryBig, label: "자료실", section: "library" });
-  }
-  if (featureAccess.schedule) {
-    navigationItems.push({ href: "/schedule", icon: CalendarDays, label: "일정관리", section: "schedule" });
-  }
-  if (profile?.isAdmin) {
-    navigationItems.push({ href: "/admin", icon: Shield, label: "관리자", section: "admin" });
   }
 
   useModalFocus(workspaceDrawerRef, {
@@ -302,7 +277,7 @@ export function AppShell({
 
   function navigationAfter(section: WorkspaceSection) {
     setWorkspaceDrawerOpen(false);
-    if (section === "files" || section === "search") {
+    if (section === "files") {
       onNavigateHome?.(section);
     }
   }
@@ -312,7 +287,7 @@ export function AppShell({
   }
 
   const activeWorkspaceLabel = navigationItems.find((item) => item.section === activeWorkspaceSection)?.label
-    ?? (variant === "vault" ? "암호화 Vault" : "작업공간");
+    ?? (activeWorkspaceSection === "admin" ? "관리자" : "메모");
 
   const accountActions = (
     <>
@@ -324,8 +299,9 @@ export function AppShell({
         type="button"
       >
         <KeyRound size={18} />
+        <span className="account-action-label">비밀번호 변경</span>
       </button>
-      <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} />
+      <ThemeToggleButton onToggle={() => void toggleTheme()} resolvedTheme={resolvedTheme} showLabel />
       <button
         aria-label="설정"
         className="icon-button"
@@ -334,9 +310,11 @@ export function AppShell({
         type="button"
       >
         <Settings size={18} />
+        <span className="account-action-label">설정</span>
       </button>
       <button className="icon-button" type="button" onClick={() => void guardedSignOut()} aria-label="로그아웃" title="로그아웃">
         <LogOut size={18} />
+        <span className="account-action-label">로그아웃</span>
       </button>
     </>
   );
@@ -383,7 +361,32 @@ export function AppShell({
       ) : (
         <div className={`obsidian-app-workspace ${workspaceDrawerOpen ? "drawer-open" : ""}`}>
           <aside aria-label="작업공간 리본" className="obsidian-app-ribbon">
+            <nav aria-label="주요 메뉴" className="obsidian-ribbon-primary">
+              {navigationItems.map((item) => {
+                const Icon = item.icon;
+                const active = activeWorkspaceSection === item.section;
+
+                return (
+                  <Link
+                    aria-current={active ? "page" : undefined}
+                    aria-label={item.label}
+                    className={`workspace-ribbon-link ${active ? "active" : ""}`}
+                    data-workspace-section={item.section}
+                    key={item.section}
+                    onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
+                    onFocus={() => preloadNavigation(item.href)}
+                    onPointerEnter={() => preloadNavigation(item.href)}
+                    title={item.label}
+                    to={item.href}
+                  >
+                    <Icon size={19} aria-hidden="true" />
+                    <span>{item.label}</span>
+                  </Link>
+                );
+              })}
+            </nav>
             <button
+              className="workspace-menu-trigger"
               aria-controls="quickmemo-workspace-drawer"
               aria-expanded={workspaceDrawerOpen}
               aria-label={workspaceDrawerOpen ? "작업공간 메뉴 닫기" : "작업공간 메뉴 열기"}
@@ -397,45 +400,9 @@ export function AppShell({
               title="작업공간 메뉴"
               type="button"
             >
-              <Menu size={19} />
+              <Menu size={19} aria-hidden="true" />
+              <span>메뉴</span>
             </button>
-            <nav aria-label="주요 메뉴" className="obsidian-ribbon-primary">
-              {navigationItems.map((item) => {
-                const Icon = item.icon;
-                const active = activeWorkspaceSection === item.section;
-
-                return item.disabled ? (
-                  <button
-                    aria-label={`${item.label} (비활성)`}
-                    className="workspace-ribbon-link unavailable"
-                    data-workspace-section={item.section}
-                    disabled
-                    key={item.section}
-                    title={item.unavailableHint}
-                    type="button"
-                  >
-                    <Icon size={19} />
-                  </button>
-                ) : (
-                  <Link
-                    aria-current={active ? "page" : undefined}
-                    aria-label={item.label}
-                    className={`workspace-ribbon-link ${active ? "active" : ""}`}
-                    data-workspace-section={item.section}
-                    key={item.section}
-                    onClick={guardedNavigation(item.href, () => navigationAfter(item.section))}
-                    onFocus={() => preloadNavigation(item.href)}
-                    onPointerEnter={() => preloadNavigation(item.href)}
-                    title={item.label}
-                    to={item.href}
-                  >
-                    <Icon size={19} />
-                  </Link>
-                );
-              })}
-            </nav>
-            <span className="obsidian-ribbon-spacer" />
-            <div className="obsidian-ribbon-secondary">{accountActions}</div>
           </aside>
 
           {workspaceDrawerOpen ? (
@@ -475,13 +442,7 @@ export function AppShell({
                     const Icon = item.icon;
                     const active = activeWorkspaceSection === item.section;
 
-                    return item.disabled ? (
-                      <span aria-disabled="true" className="obsidian-drawer-link unavailable" key={item.section} title={item.unavailableHint}>
-                        <Icon size={18} />
-                        <span>{item.label}</span>
-                        <small>준비 중</small>
-                      </span>
-                    ) : (
+                    return (
                       <Link
                         aria-current={active ? "page" : undefined}
                         className={`obsidian-drawer-link ${active ? "active" : ""}`}
@@ -507,6 +468,19 @@ export function AppShell({
                       </span>
                     </div>
                   ) : null}
+                  {profile?.isAdmin && (
+                    <Link
+                      aria-current={activeWorkspaceSection === "admin" ? "page" : undefined}
+                      className="obsidian-drawer-link"
+                      onClick={guardedNavigation("/admin", () => setWorkspaceDrawerOpen(false))}
+                      onFocus={() => preloadNavigation("/admin")}
+                      onPointerEnter={() => preloadNavigation("/admin")}
+                      to="/admin"
+                    >
+                      <Shield size={18} aria-hidden="true" />
+                      <span>관리자</span>
+                    </Link>
+                  )}
                   <div className="obsidian-drawer-account-actions">{accountActions}</div>
                 </footer>
               </aside>
@@ -545,10 +519,12 @@ export function AppShell({
 
 export function ThemeToggleButton({
   onToggle,
-  resolvedTheme
+  resolvedTheme,
+  showLabel = false
 }: {
   onToggle: () => void;
   resolvedTheme: ResolvedTheme;
+  showLabel?: boolean;
 }) {
   const isDark = resolvedTheme === "dark";
   const label = isDark ? "라이트모드로 전환" : "다크모드로 전환";
@@ -564,6 +540,7 @@ export function ThemeToggleButton({
       type="button"
     >
       <Icon size={18} />
+      {showLabel && <span className="account-action-label">{label}</span>}
     </button>
   );
 }

@@ -23,14 +23,12 @@ import {
   Menu,
   Network,
   PanelRight,
-  PenTool,
   Pin,
   Pencil,
   Save,
   Search,
   Settings2,
   Share2,
-  Table2,
   Tags,
   Trash2,
   Upload,
@@ -58,13 +56,11 @@ import { AppShell } from "../components/AppShell";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useAuth } from "../context/AuthContext";
-import { emptyJsonCanvas } from "../features/canvas/canvasModel";
 import {
   applyCanvasPathRewritePlan,
   planVaultContentPathRewritesForPathChanges
 } from "../features/canvas/canvasLinkRewrite";
-import { setJsonCanvasVaultEntryDragData } from "../features/canvas/vaultEntryDrag";
-import type { BaseMetadata } from "../features/base";
+import type { BaseMetadata } from "../features/base/types";
 import {
   dailyNoteBody,
   dailyNoteDateFromTitle,
@@ -150,7 +146,6 @@ import {
   type InternalLinkOccurrence,
   type KnowledgeMetadataSummary,
   type MarkdownHeading,
-  type FrontmatterValue,
   type ResolvedLinkOccurrence,
   type RevisionedVaultIndexEntry,
   type TagIndexEntry,
@@ -168,7 +163,6 @@ import {
   type MarkdownLinkReference,
   type MarkdownViewMode
 } from "../features/markdown";
-import { createKanbanSource } from "../features/kanban/model";
 import { setDataviewTaskChecked, type DataviewTask } from "../features/dataview/task";
 import { applyTemplateInsertion, renderSafeTemplate } from "../features/templater/templateEngine";
 import type {
@@ -178,7 +172,7 @@ import type {
 } from "../features/vault/CodeMirrorMarkdownEditor";
 import { WorkspacePaneTree, type WorkspacePaneRender } from "../features/vault/WorkspacePaneTree";
 import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
-import { setFrontmatterProperty } from "../features/vault/frontmatterEditing";
+import { VaultArchivedFilePreview } from "../features/vault/VaultArchivedFilePreview";
 import type { VaultHistoryDraft } from "../features/vault/VaultHistoryPanel";
 import { downloadBlob } from "../features/vault/browserDownload";
 import {
@@ -451,9 +445,6 @@ const resumeVaultPathRewriteJob = (
   ...args: Parameters<VaultPathRewriteJobsModule["resumeVaultPathRewriteJob"]>
 ) => loadVaultPathRewriteJobsModule().then((module) => module.resumeVaultPathRewriteJob(...args));
 
-const LazyBaseView = lazy(() => import("../features/base/BaseView").then((module) => ({
-  default: module.BaseView
-})));
 const LazyDailyNotesCalendar = lazy(() => import("../features/calendar/DailyNotesCalendar").then((module) => ({
   default: module.DailyNotesCalendar
 })));
@@ -472,12 +463,6 @@ const LazyDrawingView = lazy(() => import("../features/drawing/DrawingView").the
 })));
 const LazyGraphView = lazy(() => import("../features/graph/GraphView").then((module) => ({
   default: module.GraphView
-})));
-const LazyVaultJsonCanvasPane = lazy(() => import("../features/canvas/VaultJsonCanvasPane").then((module) => ({
-  default: module.VaultJsonCanvasPane
-})));
-const LazyKanbanBoard = lazy(() => import("../features/kanban/KanbanBoard").then((module) => ({
-  default: module.KanbanBoard
 })));
 const LazyLinkOccurrencePanel = lazy(() => import("../features/vault/LinkOccurrencePanel").then((module) => ({
   default: module.LinkOccurrencePanel
@@ -551,11 +536,19 @@ const EMPTY_FRONTMATTER_PROPERTIES = Object.freeze({});
 const MOBILE_DRAWER_FOCUSABLE = [
   "button:not(:disabled)",
   "a[href]",
+  "summary",
   "input:not(:disabled)",
   "select:not(:disabled)",
   "textarea:not(:disabled)",
   '[tabindex]:not([tabindex="-1"])'
 ].join(",");
+
+function isVisibleWorkspaceControl(element: HTMLElement) {
+  // Closed details descendants can still have client rectangles in Chromium.
+  // Their summary is focusable; the collapsed contents must stay out of traps.
+  return element.getClientRects().length > 0
+    && !element.closest("details:not([open]) > :not(summary)");
+}
 
 function subscribeMobileVaultLayout(onChange: () => void) {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
@@ -929,6 +922,7 @@ interface VaultNameMigrationProgressState {
 interface CreateVaultEntryOptions {
   folderId?: string | null;
   preserveRequestedTitle?: boolean;
+  preservedSourceEntryId?: string;
 }
 
 function timestampMillis(value: DecryptedVaultNote["createdAt"]) {
@@ -1773,7 +1767,7 @@ function UnlockedVaultPage({
   const markdownDraftRevisionRef = useRef(0);
   const [viewMode, setViewMode] = useState<MarkdownViewMode>("live-preview");
   const [pagePreview, setPagePreview] = useState<ActiveVaultPagePreview | null>(null);
-  const [calendarOpen, setCalendarOpen] = useState(true);
+  const [calendarOpen, setCalendarOpen] = useState(false);
   const [calendarCursorMonth, setCalendarCursorMonth] = useState(() => localMonthKey(new Date()));
   const [dailyNotesFolderId, setDailyNotesFolderId] = useState<string | null>(null);
   const [dailyNotesTemplateEntryId, setDailyNotesTemplateEntryId] = useState<string | null>(null);
@@ -2685,8 +2679,8 @@ function UnlockedVaultPage({
       }
       if (event.key !== "Tab" || !compactCalendarDialogRef.current) return;
       const controls = [...compactCalendarDialogRef.current.querySelectorAll<HTMLElement>(
-        "button:not(:disabled), select:not(:disabled), input:not(:disabled)"
-      )].filter((control) => !control.closest("details:not([open])"));
+        "button:not(:disabled), select:not(:disabled), input:not(:disabled), summary"
+      )].filter(isVisibleWorkspaceControl);
       if (!controls.length) return;
       const first = controls[0];
       const last = controls[controls.length - 1];
@@ -2723,6 +2717,25 @@ function UnlockedVaultPage({
     }
     setCompactCalendarOpen(true);
   }, [mobileLayout]);
+
+  function closeMobilePanelsForDialog() {
+    if (!mobileLayout) return;
+    // The newly opened dialog owns focus; the drawer must not restore or trap it.
+    mobileDrawerReturnFocusRef.current = null;
+    pendingMobileDrawerFocusRef.current = null;
+    setLeftOpen(false);
+    setRightOpen(false);
+  }
+
+  function openVaultTrash() {
+    closeMobilePanelsForDialog();
+    setTrashOpen(true);
+  }
+
+  function selectVaultImportFile() {
+    closeMobilePanelsForDialog();
+    importInputRef.current?.click();
+  }
 
   const closeContextMenu = useCallback((restoreFocus = true) => {
     const returnFocusElement = contextMenu?.returnFocusElement;
@@ -2914,7 +2927,7 @@ function UnlockedVaultPage({
     const panel = activeMobileDrawer === "left" ? leftPanelRef.current : rightPanelRef.current;
     if (!panel) return undefined;
     const focusable = () => Array.from(panel.querySelectorAll<HTMLElement>(MOBILE_DRAWER_FOCUSABLE))
-      .filter((element) => element.getClientRects().length > 0);
+      .filter(isVisibleWorkspaceControl);
     const focusTimer = window.setTimeout(() => {
       if (!panel.contains(document.activeElement)) {
         focusable()[0]?.focus();
@@ -4130,10 +4143,6 @@ function UnlockedVaultPage({
       draftsRef.current[entryId]?.body ?? note.body
     );
   }, [noteById]);
-  const draftBodyForCanvasEntry = useCallback(
-    (entryId: string, fallback: string) => draftsRef.current[entryId]?.body ?? fallback,
-    []
-  );
   const indexEntryById = useMemo(
     () => new Map(indexEntries.map((entry) => [entry.id, entry])),
     [indexEntries]
@@ -5709,6 +5718,15 @@ function UnlockedVaultPage({
     body?: string,
     options: CreateVaultEntryOptions = {}
   ): Promise<boolean> {
+    // Retired formats may only be copied from an existing draft for conflict recovery.
+    if (kind !== "markdown") {
+      const sourceId = options.preservedSourceEntryId;
+      const source = sourceId ? notesRef.current.find((note) => note.id === sourceId) : undefined;
+      if (!sourceId || source?.entryKind !== kind || body === undefined || draftsRef.current[sourceId]?.body !== body) {
+        setError("보관된 파일은 기존 편집본의 복사본만 만들 수 있습니다.");
+        return false;
+      }
+    }
     const requestedFolderId = options.folderId === undefined ? selectedFolderId : options.folderId;
     if (
       requestedFolderId !== null
@@ -5734,7 +5752,7 @@ function UnlockedVaultPage({
     let handedOffToActiveDraft = false;
     try {
       const folderId = requestedFolderId;
-      const requestedTitle = titleBase ?? (kind === "canvas" ? "새 캔버스" : kind === "base" ? "새 Base" : "새 노트");
+      const requestedTitle = titleBase ?? "새 노트";
       const ownedNotes = notes.filter((note) => note.ownerUid === profile.uid);
       const collision = options.preserveRequestedTitle
         ? ownedNotes.find((note) => (
@@ -5752,7 +5770,7 @@ function UnlockedVaultPage({
       const result = kind === "markdown"
         ? await createMarkdownVaultNote(profile, vaultIntegrityKey, { body: body ?? "", folderId, title })
         : await createEncryptedVaultEntry(profile, vaultIntegrityKey, kind === "canvas" ? {
-            body: body ?? emptyJsonCanvas,
+            body: body!,
             contentFormat: "json-canvas-v1",
             entryKind: "canvas",
             folderId,
@@ -6002,7 +6020,7 @@ function UnlockedVaultPage({
 
   function splitActiveWorkspacePane(direction: VaultWorkspaceSplitDirection) {
     if (activeTab?.kind !== "entry") {
-      setError("노트·Canvas·Base 탭을 연 뒤 새 탭 그룹으로 분할해주세요.");
+      setError("메모 탭을 연 뒤 새 탭 그룹으로 분할해주세요.");
       return;
     }
     openEntry(activeTab.entryId, { target: "new-group" }, direction);
@@ -6765,13 +6783,19 @@ function UnlockedVaultPage({
   }, [isOnline, pathRewriteRecoveryRetry, privateKey, profile.uid, vaultDataReady, vaultNameWritesReady]);
 
   useEffect(() => {
-    if (!isOnline || !vaultDataReady || !vaultNameWritesReady || pathRewriteBusy) return undefined;
+    // The importer owns its live staging job and terminal chunk cleanup. A
+    // recovery scan during that interval can mistake its changing manifest for
+    // an interrupted job or overwrite a successful import with a stale error.
+    if (!isOnline || !vaultDataReady || !vaultNameWritesReady || pathRewriteBusy || vaultImportBusy) return undefined;
     const generation = vaultImportRecoveryGenerationRef.current + 1;
     vaultImportRecoveryGenerationRef.current = generation;
     let cancelled = false;
 
     void cleanupRetainedTerminalVaultImportJobs(profile.uid)
-      .then(() => listRecoverableVaultImportJobs(profile.uid, privateKey))
+      .then(() => {
+        if (cancelled || generation !== vaultImportRecoveryGenerationRef.current) return [];
+        return listRecoverableVaultImportJobs(profile.uid, privateKey);
+      })
       .then((jobs) => {
         if (cancelled || generation !== vaultImportRecoveryGenerationRef.current) return;
         setRecoverableImportJobs(jobs);
@@ -6794,9 +6818,10 @@ function UnlockedVaultPage({
         vaultImportRecoveryGenerationRef.current += 1;
       }
     };
-  }, [isOnline, pathRewriteBusy, privateKey, profile.uid, vaultDataReady, vaultNameWritesReady]);
+  }, [isOnline, pathRewriteBusy, privateKey, profile.uid, vaultDataReady, vaultImportBusy, vaultNameWritesReady]);
 
   async function recheckRecoverableImportJobs(announce = true) {
+    if (vaultImportBusy || importAbortRef.current) return;
     if (!isOnline) {
       setError("온라인 연결 후 ZIP 가져오기 상태를 다시 확인해주세요.");
       return;
@@ -8545,65 +8570,6 @@ function UnlockedVaultPage({
     }
   }
 
-  function openKanbanLink(target: string) {
-    const hashIndex = target.indexOf("#");
-    const path = hashIndex >= 0 ? target.slice(0, hashIndex) : target;
-    const subpath = hashIndex >= 0 ? target.slice(hashIndex) : null;
-    const reference: MarkdownLinkReference = {
-      display: target,
-      embed: false,
-      kind: "wikilink",
-      path,
-      raw: `[[${target}]]`,
-      subpath,
-      target
-    };
-    const resolution = resolveMarkdownReference(reference);
-    if (resolution?.targetEntryId) {
-      openEntry(resolution.targetEntryId);
-      return;
-    }
-    const requestedPath = resolution?.unresolvedKey || path || target;
-    if (window.confirm(`'${requestedPath}' 노트를 만들까요?`)) {
-      void createUnresolvedMarkdownEntry(requestedPath);
-    }
-  }
-
-  function editBaseProperty(entryId: string, property: string, value: FrontmatterValue) {
-    if (deletingEntryIdsRef.current.has(entryId)) {
-      setError("휴지통으로 이동 중인 항목은 속성을 수정할 수 없습니다.");
-      return;
-    }
-    const note = notes.find((candidate) => candidate.id === entryId);
-    const current = draftsRef.current[entryId];
-    if (!note || !current || note.contentFormat !== "markdown-v1") {
-      setError("Markdown 노트의 지원되는 최상위 속성만 Base에서 편집할 수 있습니다.");
-      return;
-    }
-    try {
-      if (!current.dirty) {
-        captureMarkdownDraftBase(entryId, note, current);
-      }
-      const nextDraft: DraftState = {
-        ...current,
-        body: setFrontmatterProperty(current.body, property, value),
-        dirty: true
-      };
-      const nextDrafts = { ...draftsRef.current, [entryId]: nextDraft };
-      draftsRef.current = nextDrafts;
-      setDrafts(nextDrafts);
-      setSaveFailedEntryIds((currentFailures) => {
-        const next = new Set(currentFailures);
-        next.delete(entryId);
-        return next;
-      });
-      setError(null);
-      window.setTimeout(() => void saveEntry(entryId), 0);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Base 속성을 수정하지 못했습니다.");
-    }
-  }
-
   function renderMarkdownEmbed(reference: MarkdownLinkReference) {
     const resolution = resolveMarkdownReference(reference);
     const target = resolution?.targetEntryId
@@ -8844,6 +8810,9 @@ function UnlockedVaultPage({
       }
       return;
     }
+    // Invalidate the previous scan synchronously, before the busy-state
+    // effect cleanup runs, so its late completion cannot surface stale jobs.
+    vaultImportRecoveryGenerationRef.current += 1;
     setError(null);
     setVaultImportBusy(true);
     const abortController = new AbortController();
@@ -9980,45 +9949,6 @@ function UnlockedVaultPage({
     return pasteImagesIntoMarkdownEntry(activeEntryId, files, context);
   }
 
-  async function importCanvasExternalFiles(files: readonly File[]) {
-    const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
-    const assertCurrent = () => {
-      if (workspaceAccessScopeGenerationRef.current !== accessScopeGeneration) {
-        throw new DOMException("Vault 접근 범위가 변경되었습니다.", "AbortError");
-      }
-    };
-    if (!vaultIntegrityKey || !vaultNameWritesReady || pathRewriteBusyRef.current) {
-      throw new Error("암호화된 이름 예약이 끝난 뒤 외부 파일을 추가해주세요.");
-    }
-    const folderId = selectedFolderId;
-    const folderPath = folderId ? folderPaths.get(folderId) : "";
-    if (folderId && !folderPath) {
-      throw new Error("외부 파일을 저장할 Vault 폴더를 확인하지 못했습니다.");
-    }
-    const existingTitles = notesRef.current
-      .filter((note) => (note.folderId ?? null) === folderId)
-      .map((note) => entryLabel(note));
-    const canvasImport = await import("../features/canvas/vaultCanvasExternalFiles");
-    assertCurrent();
-    return canvasImport.importVaultCanvasExternalFiles({
-      assertCurrent,
-      createAsset: async ({ bytes, mimeType, title }) => {
-        assertCurrent();
-        const result = await createEncryptedVaultAsset(profile, vaultIntegrityKey, {
-          bytes,
-          folderId,
-          mimeType,
-          title
-        });
-        assertCurrent();
-        pendingCreatedEntryIdsRef.current.add(result.noteId);
-      },
-      existingTitles,
-      files,
-      folderPath: folderPath ?? ""
-    });
-  }
-
   async function createConvertedMarkdownCopy(draft: VaultMarkdownCopyDraft) {
     const accessScopeGeneration = workspaceAccessScopeGenerationRef.current;
     const assertCurrent = () => {
@@ -10143,10 +10073,7 @@ function UnlockedVaultPage({
     }
     switch (command.id) {
       case "new-note": void createEntry("markdown"); break;
-      case "new-canvas": void createEntry("canvas"); break;
-      case "new-base": void createEntry("base"); break;
       case "new-drawing": void createEntry("markdown", "새 드로잉", createDrawingSource("새 드로잉")); break;
-      case "new-kanban": void createEntry("markdown", "새 Kanban", createKanbanSource("새 Kanban")); break;
       case "daily-note": openDailyNote(); break;
       case "unique-note": createUniqueNote(); break;
       case "random-note": openRandomNote(); break;
@@ -10570,7 +10497,8 @@ function UnlockedVaultPage({
     if (!note || !draft || note.entryKind === "asset" || note.entryKind === "legacy-html") return;
     const kind = note.entryKind as "markdown" | "canvas" | "base";
     const preserved = await createEntry(kind, `${draft.title.replace(/\.(?:md|canvas|base)$/iu, "")} 충돌 복사본`, draft.body, {
-      folderId: draft.folderId
+      folderId: draft.folderId,
+      preservedSourceEntryId: entryId
     });
     if (preserved) {
       setStatus("현재 편집본을 별도 암호화 항목으로 보존했습니다. 원본 충돌은 그대로 유지됩니다.");
@@ -10846,24 +10774,14 @@ function UnlockedVaultPage({
           className="vault-ribbon"
           inert={Boolean(activeMobileDrawer)}
         >
-          <button aria-controls="vault-left-panel" aria-expanded={leftOpen} aria-label={leftOpen ? "왼쪽 패널 닫기" : "왼쪽 패널 열기"} onClick={toggleLeftPanel} ref={leftPanelToggleRef} type="button"><Menu size={18} /></button>
-          <button aria-label="명령 팔레트" onClick={() => setCommandPaletteOpen(true)} title="명령 팔레트 (Cmd/Ctrl+P)" type="button"><CommandIcon size={18} /></button>
-          <button aria-label="파일" aria-pressed={leftMode === "files"} onClick={() => showLeftPanel("files")} title="파일" type="button"><Files size={18} /></button>
-          <button aria-label="검색" aria-pressed={leftMode === "search"} onClick={() => showLeftPanel("search")} title="검색" type="button"><Search size={18} /></button>
-          <button aria-label="태그" aria-pressed={leftMode === "tags"} onClick={() => showLeftPanel("tags")} title="태그" type="button"><Tags size={18} /></button>
-          <button aria-label="북마크와 워크스페이스" aria-pressed={leftMode === "bookmarks"} onClick={() => showLeftPanel("bookmarks")} title="북마크와 워크스페이스" type="button"><Bookmark size={18} /></button>
-          <button aria-label="그래프 보기" onClick={openGlobalGraph} title="그래프 보기" type="button"><Network size={18} /></button>
-          <button aria-label="새 Canvas" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("canvas")} title="새 Canvas" type="button"><GitFork size={18} /></button>
-          <button aria-label="새 Base" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("base")} title="새 Base" type="button"><Table2 size={18} /></button>
-          <button aria-label="새 QuickMemo Drawing" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown", "새 드로잉", createDrawingSource("새 드로잉"))} title="새 QuickMemo Drawing" type="button"><PenTool size={18} /></button>
-          <button aria-label="새 Kanban" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown", "새 Kanban", createKanbanSource("새 Kanban"))} title="새 Kanban" type="button"><Columns3 size={18} /></button>
-          <button aria-label="Obsidian ZIP 가져오기" disabled={!vaultNameWritesReady || vaultImportBusy || pathRewriteBusy || entryCreationContentLocked} onClick={() => importInputRef.current?.click()} title="Obsidian ZIP 가져오기" type="button"><Upload size={18} /></button>
-          <button aria-label="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기" onClick={() => void exportObsidianZip()} title="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기" type="button"><Download size={18} /></button>
-          <button aria-label="Vault 휴지통" onClick={() => setTrashOpen(true)} ref={trashButtonRef} title="Vault 휴지통" type="button"><Trash2 size={18} /></button>
+          <button aria-controls="vault-left-panel" aria-expanded={leftOpen} aria-label={leftOpen ? "왼쪽 패널 닫기" : "왼쪽 패널 열기"} onClick={toggleLeftPanel} ref={leftPanelToggleRef} type="button"><Menu aria-hidden="true" size={19} /><span>메뉴</span></button>
+          <button aria-label="파일" aria-pressed={leftOpen && leftMode === "files"} onClick={() => showLeftPanel("files")} type="button"><Files aria-hidden="true" size={19} /><span>메모</span></button>
+          <button aria-label="검색" aria-pressed={leftOpen && leftMode === "search"} onClick={() => showLeftPanel("search")} type="button"><Search aria-hidden="true" size={19} /><span>검색</span></button>
+          <button aria-label="북마크와 워크스페이스" aria-pressed={leftOpen && leftMode === "bookmarks"} onClick={() => showLeftPanel("bookmarks")} type="button"><Bookmark aria-hidden="true" size={19} /><span>북마크</span></button>
           <span className="vault-ribbon-spacer" />
-          <button aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} title="자료실" type="button"><LibraryBig size={18} /></button>
-          <button aria-label="일정" onClick={() => void navigateAfterSaving("/schedule")} title="일정" type="button"><CalendarDays size={18} /></button>
-          <button aria-label="기존 노트 관리" onClick={() => void navigateAfterSaving("/app/legacy")} title="기존 노트 관리" type="button"><Settings2 size={18} /></button>
+          <button aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} type="button"><LibraryBig aria-hidden="true" size={19} /><span>자료실</span></button>
+          <button aria-label="일정" onClick={() => void navigateAfterSaving("/schedule")} type="button"><CalendarDays aria-hidden="true" size={19} /><span>일정</span></button>
+          <button aria-label="명령 팔레트" onClick={() => setCommandPaletteOpen(true)} title="명령 팔레트 (Cmd/Ctrl+P)" type="button"><CommandIcon aria-hidden="true" size={19} /><span>명령</span></button>
         </aside>
 
         {activeMobileDrawer ? (
@@ -10887,7 +10805,7 @@ function UnlockedVaultPage({
             tabIndex={mobileLayout ? -1 : undefined}
           >
             <header>
-              <strong>{leftMode === "files" ? "파일" : leftMode === "search" ? "검색" : leftMode === "tags" ? "태그" : "북마크"}</strong>
+              <strong>{leftMode === "files" ? "내 메모" : leftMode === "search" ? "검색" : leftMode === "tags" ? "태그" : "북마크"}</strong>
               <button
                 aria-controls="vault-left-panel"
                 aria-expanded="true"
@@ -10901,10 +10819,8 @@ function UnlockedVaultPage({
             {leftMode === "files" ? (
               <>
                 <div className="vault-panel-toolbar">
-                  <button aria-label="새 노트" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button"><FilePlus2 size={16} /></button>
-                  <button aria-label="새 폴더" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createFolder()} type="button"><FolderPlus size={16} /></button>
-                  <button aria-label="새 Canvas" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("canvas")} type="button"><GitFork size={16} /></button>
-                  <button aria-label="새 Base" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("base")} type="button"><Table2 size={16} /></button>
+                  <button aria-label="새 노트" className="vault-create-note" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button"><FilePlus2 aria-hidden="true" size={16} /><span>새 메모</span></button>
+                  <button aria-label="새 폴더" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createFolder()} title="새 폴더" type="button"><FolderPlus aria-hidden="true" size={16} /></button>
                 </div>
                 {legacyFolderCount > 0 ? (
                   <button className="vault-migration-button" disabled={!vaultNameWritesReady || folderMigrationBusy} onClick={() => void migrateFolders()} type="button">
@@ -10957,7 +10873,7 @@ function UnlockedVaultPage({
                     {compactCalendarLayout
                       ? <ChevronRight size={14} />
                       : calendarOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    <CalendarDays size={14} /> Daily Notes
+                    <CalendarDays size={14} /> 날짜별 메모
                   </button>
                   {calendarOpen && !compactCalendarLayout ? (
                     <Suspense fallback={<VaultViewLoading label="Daily Notes" />}>
@@ -11037,6 +10953,17 @@ function UnlockedVaultPage({
                 />
               </Suspense>
             )}
+            <details className="vault-more-tools">
+              <summary><Settings2 aria-hidden="true" size={16} /><span>더 보기</span><ChevronDown aria-hidden="true" size={14} /></summary>
+              <div className="vault-more-tools-content">
+                <button aria-label="태그" onClick={() => showLeftPanel("tags")} type="button"><Tags aria-hidden="true" size={16} />태그 모아 보기</button>
+                <button aria-label="그래프 보기" onClick={openGlobalGraph} type="button"><Network aria-hidden="true" size={16} />메모 연결 보기</button>
+                <button aria-label="Obsidian ZIP 가져오기" disabled={!vaultNameWritesReady || vaultImportBusy || pathRewriteBusy || entryCreationContentLocked} onClick={selectVaultImportFile} type="button"><Upload aria-hidden="true" size={16} />파일 가져오기</button>
+                <button aria-label="노트와 첨부파일을 복호화해 Obsidian ZIP 내보내기" onClick={() => void exportObsidianZip()} type="button"><Download aria-hidden="true" size={16} />전체 파일 내보내기</button>
+                <button aria-label="Vault 휴지통" onClick={openVaultTrash} ref={trashButtonRef} type="button"><Trash2 aria-hidden="true" size={16} />휴지통</button>
+                <button aria-label="기존 노트 관리" onClick={() => void navigateAfterSaving("/app/legacy")} type="button"><History aria-hidden="true" size={16} />이전 메모 관리</button>
+              </div>
+            </details>
           </aside>
         ) : null}
 
@@ -11291,25 +11218,11 @@ function UnlockedVaultPage({
                   </aside>
                 ) : null}
                 <div className="vault-note-content">
-                  {activeNote.entryKind === "canvas" ? (
-                    <Suspense fallback={<VaultViewLoading label="Canvas" />}>
-                      <LazyVaultJsonCanvasPane
-                        decodedAssetForEntry={decodedAssetForEntry}
-                        entryPaths={entryPaths}
-                        getDraftBody={draftBodyForCanvasEntry}
-                        key={activeNote.id}
-                        markdownDraftRevision={markdownDraftRevisionRef.current}
-                        notes={notes}
-                        onChange={(body) => updateActiveDraft({ body })}
-                        onImportExternalFiles={importCanvasExternalFiles}
-                        onOpenFile={(path) => {
-                          const entry = indexEntries.find((candidate) => candidate.path === path);
-                          if (entry) openEntry(entry.id);
-                        }}
-                        readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                        source={activeDraft.body}
-                      />
-                    </Suspense>
+                  {activeNote.entryKind === "canvas" || activeNote.entryKind === "base" ? (
+                    <VaultArchivedFilePreview
+                      fileName={entryLabel({ ...activeNote, title: activeDraft.title })}
+                      source={activeDraft.body}
+                    />
                   ) : activeNote.entryKind === "asset" ? (
                     decodedAssetForEntry(activeNote.id) ? (
                       <VaultAssetPreview
@@ -11321,29 +11234,6 @@ function UnlockedVaultPage({
                         첨부 데이터의 무결성을 확인할 수 없어 미리보기와 내보내기를 차단했습니다.
                       </div>
                     )
-                  ) : activeNote.entryKind === "base" ? (
-                    <div className="vault-base-view">
-                      <Suspense fallback={<VaultViewLoading label="Base" />}>
-                        <LazyBaseView
-                          entries={indexEntries}
-                          metadataByEntryId={baseMetadataByEntryId}
-                          onEditProperty={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked ? undefined : editBaseProperty}
-                          onOpenEntry={(entryId) => openEntry(entryId)}
-                          readOnlyEntryIds={deletingEntryIds}
-                          source={activeDraft.body}
-                        />
-                      </Suspense>
-                      <details>
-                        <summary>Base YAML 편집</summary>
-                        <VaultMarkdownEditor
-                          documentKey={activeNote.id}
-                          onChange={(body) => updateActiveDraft({ body })}
-                          onSave={() => void saveEntry(activeNote.id)}
-                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                          value={activeDraft.body}
-                        />
-                      </details>
-                    </div>
                   ) : activeNote.contentFormat === "legacy-html-v1" ? (
                     <div className="vault-legacy-note">
                       <div className="vault-legacy-banner">
@@ -11371,21 +11261,12 @@ function UnlockedVaultPage({
                         />
                       </Suspense>
                       {activeMarkdownPluginView && viewMode !== "source" ? (
-                        <Suspense fallback={<VaultViewLoading label={activeMarkdownPluginView === "drawing" ? "Drawing" : "Kanban"} />}>
-                          {activeMarkdownPluginView === "drawing" ? (
-                            <LazyDrawingView
-                              onChange={(body) => updateActiveDraft({ body })}
-                              readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                              source={activeDraft.body}
-                            />
-                          ) : (
-                            <LazyKanbanBoard
-                              onChange={(body) => updateActiveDraft({ body })}
-                              onOpenLink={openKanbanLink}
-                              readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                              source={activeDraft.body}
-                            />
-                          )}
+                        <Suspense fallback={<VaultViewLoading label="드로잉" />}>
+                          <LazyDrawingView
+                            onChange={(body) => updateActiveDraft({ body })}
+                            readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                            source={activeDraft.body}
+                          />
                         </Suspense>
                       ) : viewMode === "reading" ? (
                         <MarkdownRenderer
@@ -11444,8 +11325,8 @@ function UnlockedVaultPage({
             ) : (
               <div className="vault-empty-state">
                 <BookOpen size={34} />
-                <h2>새로운 지식의 점을 만드세요</h2>
-                <p>Markdown 노트를 만들고 <code>[[링크]]</code>와 <code>#태그</code>로 연결할 수 있습니다.</p>
+                <h2>가볍게 적고, 쉽게 찾으세요</h2>
+                <p>생각과 할 일을 한곳에 기록하세요.<br />메모는 암호화되어 안전하게 보관됩니다.</p>
                 <button disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button">새 노트</button>
               </div>
             )}
@@ -11879,7 +11760,7 @@ function UnlockedVaultPage({
             onClose={() => setTrashOpen(false)}
             onRestore={(entryId) => void restoreTrashEntry(entryId)}
             onRestoreFolder={(folderId) => void restoreTrashFolder(folderId)}
-            returnFocusTo={trashButtonRef.current}
+            returnFocusTo={mobileLayout ? leftPanelToggleRef.current : trashButtonRef.current}
             serverReady={trashServerReady}
           />
         </Suspense>
@@ -11957,7 +11838,7 @@ function UnlockedVaultPage({
               }
               if (event.key === "Tab") {
                 const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(MOBILE_DRAWER_FOCUSABLE)]
-                  .filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true");
+                  .filter((element) => !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true" && isVisibleWorkspaceControl(element));
                 if (!focusable.length) return;
                 const first = focusable[0];
                 const last = focusable[focusable.length - 1];
@@ -12585,7 +12466,6 @@ export function VaultFileTree({
                 onContextEntry(note.id, event.clientX, event.clientY, event.currentTarget);
               }}
               onDragStart={(event) => {
-                setJsonCanvasVaultEntryDragData(event.dataTransfer, note.id);
                 event.dataTransfer.setData("application/x-quickmemo-entry", note.id);
                 event.dataTransfer.effectAllowed = "copyMove";
               }}

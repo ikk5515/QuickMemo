@@ -119,7 +119,7 @@ export const MAX_NAMED_WORKSPACES = 32;
 export const DEFAULT_VAULT_RIGHT_PANEL_WIDTH = 310;
 export const MIN_VAULT_RIGHT_PANEL_WIDTH = 250;
 export const MAX_VAULT_RIGHT_PANEL_WIDTH = 480;
-const VAULT_RIBBON_WIDTH = 44;
+const VAULT_RIBBON_WIDTH = 64;
 const MIN_VAULT_EDITOR_WIDTH = 280;
 export const MAX_NAMED_WORKSPACE_SNAPSHOT_SERIALIZED_BYTES = 12_000;
 export const MAX_NAMED_WORKSPACES_SERIALIZED_BYTES = 300_000;
@@ -919,7 +919,7 @@ export function createDefaultVaultWorkspaceState(): VaultPersistedWorkspaceState
     activeTabGroupId: "primary",
     layout: createDefaultWorkspaceLayout(),
     left: { open: true, mode: "files" },
-    right: { open: true, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
+    right: { open: false, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
     selectedFolderId: null,
     expandedFolderIds: [],
     searchQuery: "",
@@ -932,7 +932,7 @@ export function createDefaultVaultWorkspaceState(): VaultPersistedWorkspaceState
       calendar: {
         cursorMonth: localMonthKey(new Date()),
         folderId: null,
-        open: true,
+        open: false,
         templateEntryId: null
       },
       templates: {

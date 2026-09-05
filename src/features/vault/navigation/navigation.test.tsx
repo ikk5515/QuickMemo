@@ -131,9 +131,9 @@ describe("CommandPalette", () => {
     );
 
     fireEvent.change(screen.getByRole("combobox", { name: "명령 검색" }), {
-      target: { value: "새 Canvas" }
+      target: { value: "새 노트" }
     });
-    expect(screen.getByRole("option")).toHaveTextContent("새 Canvas 만들기");
+    expect(screen.getByRole("option", { name: /^새 노트 만들기/ })).toHaveTextContent("새 노트 만들기");
   });
 
   it("provides modal combobox semantics, fuzzy filtering, and keyboard activation", () => {

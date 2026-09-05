@@ -209,6 +209,57 @@ describe("durable encrypted Vault import jobs", () => {
     ]);
   });
 
+  it.each(["committed", "removed"] as const)(
+    "does not report corruption when a queried import is %s before its chunks are read",
+    async (outcome) => {
+      await ensureVaultImportJob({ profile, privateKey, jobId, manifest });
+      const read = firestoreMocks.getDocsFromServer.getMockImplementation()!;
+      const path = `vaultMaintenanceJobs/${uid}/imports/${jobId}`;
+      firestoreMocks.getDocsFromServer
+        .mockImplementationOnce(async (target) => read(target))
+        .mockImplementationOnce(async (target) => {
+          // The recovery query saw staging. A different tab then atomically
+          // completed the import and removed its retained manifest chunks.
+          const stored = firestoreMocks.documents.get(path)!;
+          firestoreMocks.documents.delete(`${path}/chunks/chunk-000`);
+          if (outcome === "removed") firestoreMocks.documents.delete(path);
+          else firestoreMocks.documents.set(path, {
+            ...stored, status: "committed", remainingChunkCount: 0, revision: 4
+          });
+          return read(target);
+        });
+
+      await expect(listRecoverableVaultImportJobs(uid, privateKey)).resolves.toEqual([]);
+      expect(firestoreMocks.documents.has("notes/entry-a")).toBe(false);
+      expect(noteMocks.deleteRevisionedNote).not.toHaveBeenCalled();
+    }
+  );
+
+  it("drops a completed job even when the older manifest snapshot remains readable", async () => {
+    await ensureVaultImportJob({ profile, privateKey, jobId, manifest });
+    const read = firestoreMocks.getDocsFromServer.getMockImplementation()!;
+    const path = `vaultMaintenanceJobs/${uid}/imports/${jobId}`;
+    firestoreMocks.getDocsFromServer
+      .mockImplementationOnce(async (target) => read(target))
+      .mockImplementationOnce(async (target) => {
+        const chunks = await read(target);
+        const stored = firestoreMocks.documents.get(path)!;
+        firestoreMocks.documents.set(path, { ...stored, status: "committed", revision: 3 });
+        return chunks;
+      });
+
+    await expect(listRecoverableVaultImportJobs(uid, privateKey)).resolves.toEqual([]);
+  });
+
+  it("keeps missing chunks in a still-active import as a blocking corruption error", async () => {
+    await ensureVaultImportJob({ profile, privateKey, jobId, manifest });
+    firestoreMocks.documents.delete(`vaultMaintenanceJobs/${uid}/imports/${jobId}/chunks/chunk-000`);
+
+    await expect(listRecoverableVaultImportJobs(uid, privateKey)).rejects.toMatchObject({ code: "corrupt" });
+    expect(noteMocks.deleteRevisionedNote).not.toHaveBeenCalled();
+    expect(noteMocks.trashRevisionedEncryptedFolderSubtree).not.toHaveBeenCalled();
+  });
+
   it("confirms an idempotent committed retry and removes terminal ciphertext retention", async () => {
     await ensureVaultImportJob({ profile, privateKey, jobId, manifest });
     await expect(commitVaultImportJob(uid, jobId)).resolves.toMatchObject({ status: "committed" });

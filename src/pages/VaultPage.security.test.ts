@@ -19,8 +19,8 @@ const codeMirrorMarkdownEditorSource = readFileSync(
   join(process.cwd(), "src/features/vault/CodeMirrorMarkdownEditor.tsx"),
   "utf8"
 );
-const vaultCanvasExternalFilesSource = readFileSync(
-  join(process.cwd(), "src/features/canvas/vaultCanvasExternalFiles.ts"),
+const vaultArchivedFilePreviewSource = readFileSync(
+  join(process.cwd(), "src/features/vault/VaultArchivedFilePreview.tsx"),
   "utf8"
 );
 
@@ -94,7 +94,7 @@ describe("VaultPage security boundaries", () => {
     expect(manualRecovery).toContain("if (!continuationIsCurrent()) return;\n      const blockedJob");
 
     const automaticRecovery = vaultPageSource.match(
-      /const generation = pathRewriteRecoveryGenerationRef\.current \+ 1;[\s\S]*?\n\s{2}useEffect\(\(\) => \{\n\s{4}if \(!isOnline \|\| !vaultDataReady/u
+      /const generation = pathRewriteRecoveryGenerationRef\.current \+ 1;[\s\S]*?\n {2}\}, \[/u
     )?.[0] ?? "";
     expect(automaticRecovery).toContain("cancelled,");
     expect(automaticRecovery).toContain(
@@ -170,7 +170,8 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("const entryCreationContentLocked = pendingEntryCreation !== null;");
     expect(titleInput).toContain("|| entryCreationContentLocked");
     expect(inactivePane).toContain("|| entryCreationContentLocked");
-    expect(vaultPageSource).toContain("onEditProperty={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked ? undefined");
+    expect(vaultPageSource).toContain("readOnly={viewMode === \"reading\" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}");
+    expect(vaultPageSource).not.toContain("onEditProperty=");
     expect(vaultPageSource).not.toMatch(/const entryCreationContentLocked[^;]*savingEntryIds/u);
   });
 
@@ -276,26 +277,21 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).not.toContain("기존 노트 관리의 휴지통에서 복구");
   });
 
-  it("routes Canvas operating-system drops through the existing encrypted asset boundary", () => {
-    const importer = vaultPageSource.match(
-      /async function importCanvasExternalFiles[\s\S]*?async function createConvertedMarkdownCopy/u
-    )?.[0] ?? "";
-
-    expect(importer).toContain('import("../features/canvas/vaultCanvasExternalFiles")');
-    expect(importer).toContain("await createEncryptedVaultAsset(profile, vaultIntegrityKey");
-    expect(importer).toContain("workspaceAccessScopeGenerationRef.current !== accessScopeGeneration");
-    expect(vaultCanvasExternalFilesSource).toContain("MAX_INLINE_VAULT_ASSET_BYTES");
-    expect(vaultCanvasExternalFilesSource).toContain("bytes?.fill(0)");
-    expect(importer).not.toContain("localStorage");
-    expect(importer).not.toContain("sessionStorage");
-    expect(vaultCanvasExternalFilesSource).not.toContain("localStorage");
-    expect(vaultCanvasExternalFilesSource).not.toContain("sessionStorage");
-    expect(vaultPageSource).toContain("onImportExternalFiles={importCanvasExternalFiles}");
+  it("keeps retired files as inert text without Canvas drop or editing handlers", () => {
+    expect(vaultPageSource).not.toContain("importCanvasExternalFiles");
+    expect(vaultPageSource).not.toContain("onImportExternalFiles");
+    expect(vaultPageSource).not.toContain("LazyVaultJsonCanvasPane");
+    expect(vaultArchivedFilePreviewSource).toContain("<pre>{source}</pre>");
+    expect(vaultArchivedFilePreviewSource).toContain('type: "application/octet-stream"');
+    expect(vaultArchivedFilePreviewSource).not.toContain("dangerouslySetInnerHTML");
+    expect(vaultArchivedFilePreviewSource).not.toContain("<iframe");
+    expect(vaultArchivedFilePreviewSource).not.toContain("localStorage");
+    expect(vaultArchivedFilePreviewSource).not.toContain("sessionStorage");
   });
 
   it("routes Markdown pasted, selected, and dropped images through encrypted asset-v1 storage", () => {
     const pasteHandler = vaultPageSource.match(
-      /async function pasteImagesIntoMarkdownEntry[\s\S]*?async function importCanvasExternalFiles/u
+      /async function pasteImagesIntoMarkdownEntry[\s\S]*?async function createConvertedMarkdownCopy/u
     )?.[0] ?? "";
 
     expect(pasteHandler).toContain('note.ownerUid !== profile.uid || note.type !== "personal"');

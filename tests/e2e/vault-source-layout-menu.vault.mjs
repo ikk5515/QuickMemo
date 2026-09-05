@@ -358,7 +358,7 @@ test("block HTML normalization creates a Markdown copy without changing its mark
   await expectCleanRuntime(diagnostics, fixture);
 });
 
-test("desktop workspace controls, dark wikilinks, and Canvas navigation remain deliberate", async ({
+test("desktop workspace controls and dark wikilinks remain deliberate", async ({
   page,
   request
 }, testInfo) => {
@@ -466,69 +466,9 @@ test("desktop workspace controls, dark wikilinks, and Canvas navigation remain d
   await saveButton.click();
   await expect(saveButton).toBeDisabled({ timeout: 30_000 });
 
-  const createCanvas = page
-    .getByRole("complementary", { name: "Vault 리본" })
-    .getByRole("button", { name: "새 Canvas", exact: true });
-  await expect(createCanvas).toBeEnabled({ timeout: 30_000 });
-  await createCanvas.click();
-  await expect(noteTitle).toHaveValue("새 캔버스");
-  const canvas = page.getByRole("region", { name: "Canvas" });
-  await expect(canvas).toBeVisible();
-
-  await canvas.getByRole("button", { name: "텍스트 카드 추가", exact: true }).click();
-  const textCard = canvas.getByRole("article", { name: "Canvas 카드: 새 메모", exact: true });
-  await expect(textCard).toBeVisible();
-  await textCard.dblclick();
-  const canvasTextEditor = canvas.getByRole("textbox", { name: "Canvas 텍스트", exact: true });
-  await expect(canvasTextEditor).toBeFocused();
-  await canvasTextEditor.click();
-  await canvasTextEditor.pressSequentially(" 연속 입력", { delay: 30 });
-  await expect(canvasTextEditor).toBeFocused();
-  await expect(canvasTextEditor).toHaveValue("새 메모 연속 입력");
-
-  await canvas.getByRole("button", { name: "추가할 노트 선택" }).click();
-  const chooser = page.getByRole("dialog", { name: "Canvas 파일 선택" });
-  await expect(chooser).toBeVisible();
-  await chooser.getByText("새 노트.md", { exact: true }).locator("..").click();
-  await canvas.getByRole("button", { name: "선택한 노트 카드 추가" }).click();
-  const fileCard = canvas.getByRole("article", { name: "Canvas 카드: 새 노트.md", exact: true });
-  await expect(fileCard).toBeVisible();
-
-  // A normal click selects a card; it must not unexpectedly navigate away.
-  await fileCard.locator(".vault-canvas-file-label").click();
-  await expect(noteTitle).toHaveValue("새 캔버스");
-  await expect(canvas).toBeVisible();
-  const fileFlowNode = fileCard.locator(
-    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' react-flow__node ')][1]"
-  );
-  await expect(fileFlowNode).toHaveClass(/selected/u);
-
-  // Locate a genuinely empty pane point instead of relying on a fixed pixel
-  // that could be occupied after fitView. Primary-button dragging there must
-  // update the user-visible viewport transform.
-  const pane = canvas.locator(".react-flow__pane");
-  const panStart = await pane.evaluate((element) => {
-    const bounds = element.getBoundingClientRect();
-    // fitView can make a single card occupy most of the pane. The upper-left
-    // inset remains real background and mirrors the user's ordinary drag.
-    return { x: bounds.left + 16, y: bounds.top + 16 };
-  });
-  const viewport = canvas.locator(".react-flow__viewport");
-  const transformBeforePan = await viewport.evaluate((element) => getComputedStyle(element).transform);
-  await page.mouse.move(panStart.x, panStart.y);
-  await page.mouse.down({ button: "left" });
-  await page.mouse.move(panStart.x - 96, panStart.y - 58, { steps: 8 });
-  await page.mouse.up({ button: "left" });
-  await expect.poll(
-    () => viewport.evaluate((element) => getComputedStyle(element).transform),
-    { timeout: 5_000 }
-  ).not.toBe(transformBeforePan);
-  await expect(noteTitle).toHaveValue("새 캔버스");
-
-  // Opening the linked note is an explicit double-click action.
-  await fileCard.locator(".vault-canvas-file-label").dblclick();
-  await expect(noteTitle).toHaveValue("새 노트");
-  await expect(canvas).toHaveCount(0);
+  for (const retiredAction of ["새 Canvas", "새 Base", "새 Kanban"]) {
+    await expect(page.getByRole("button", { name: retiredAction, exact: true })).toHaveCount(0);
+  }
 
   // Creation leaves several normal tabs open. Close every tab and prove the
   // final explicit close remains an empty workspace after async state settles.
@@ -541,10 +481,10 @@ test("desktop workspace controls, dark wikilinks, and Canvas navigation remain d
     await closeButtons.last().click();
     await expect(workspaceTabs).toHaveCount(remaining - 1);
   }
-  await expect(page.getByRole("heading", { name: "새로운 지식의 점을 만드세요" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "가볍게 적고, 쉽게 찾으세요" })).toBeVisible();
   await page.waitForTimeout(1_500);
   await expect(workspaceTabs).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "새로운 지식의 점을 만드세요" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "가볍게 적고, 쉽게 찾으세요" })).toBeVisible();
 
   await expectCleanRuntime(diagnostics, fixture);
 });

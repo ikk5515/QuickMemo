@@ -26,6 +26,18 @@ describe("Vault mobile drawer accessibility contract", () => {
     expect(source).toContain('event.key !== "Tab"');
   });
 
+  it("hands focus from the mobile tools drawer to the next dialog", () => {
+    const launcher = source.slice(source.indexOf("  function closeMobilePanelsForDialog()"), source.indexOf("  const closeContextMenu"));
+    expect(launcher).toContain("if (!mobileLayout) return;");
+    expect(launcher).toContain("mobileDrawerReturnFocusRef.current = null;");
+    expect(launcher).toContain("pendingMobileDrawerFocusRef.current = null;");
+    expect(launcher).toContain("setLeftOpen(false);");
+    expect(launcher).toContain("setRightOpen(false);");
+    expect(launcher.match(/closeMobilePanelsForDialog\(\);/gu)).toHaveLength(2);
+    expect(source).toContain("returnFocusTo={mobileLayout ? leftPanelToggleRef.current : trashButtonRef.current}");
+    expect(source).toContain('  "summary",');
+  });
+
   it("provides a pointer backdrop without creating a keyboard dead end", () => {
     expect(source).toContain('className="vault-mobile-drawer-backdrop"');
     expect(source).toContain("tabIndex={-1}");

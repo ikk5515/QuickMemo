@@ -2,6 +2,7 @@
 
 import { expect, test } from "@playwright/test";
 import {
+  openVaultMoreTool,
   expectNoHorizontalOverflow,
   loginDirectly,
   navigateWithinApp,
@@ -96,9 +97,9 @@ test("Playwright WebKit keeps the reduced-motion Vault UI contained and accessib
     await expectMinimumTouchTargets(drawer, "button", "Vault explorer drawer");
 
     const controls = drawer.locator(
-      'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
+      'summary, a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])'
     );
-    await controls.last().focus();
+    await controls.filter({ visible: true }).last().focus();
     await page.keyboard.press("Tab");
     await expect(drawer.getByRole("button", { name: "왼쪽 패널 닫기" })).toBeFocused();
     await page.keyboard.press("Escape");
@@ -117,7 +118,7 @@ test("Playwright WebKit keeps the reduced-motion Vault UI contained and accessib
     await expect(page.getByRole("complementary", { name: "Vault 탐색기" })).toBeVisible();
   }
 
-  await page.getByRole("button", { name: "그래프 보기", exact: true }).click();
+  await openVaultMoreTool(page, "그래프 보기");
   const graph = page.getByRole("region", { name: "전체 그래프" });
   await expect(graph).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "그래프 화면 제어" })).toBeVisible();

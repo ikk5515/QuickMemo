@@ -347,7 +347,7 @@ describe("Vault workspace UI regression contract", () => {
     expect(source).toContain("const pathRewriteCleanupOwnerRef = useRef<string | null>(null);");
     const recoveryEffect = sourceBetween(
       "const generation = pathRewriteRecoveryGenerationRef.current + 1;",
-      "useEffect(() => {\n    if (!isOnline || !vaultDataReady || !vaultNameWritesReady || pathRewriteBusy)"
+      "\n  }, ["
     );
     expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current !== profile.uid");
     expect(recoveryEffect).toContain("pathRewriteCleanupOwnerRef.current = profile.uid;");

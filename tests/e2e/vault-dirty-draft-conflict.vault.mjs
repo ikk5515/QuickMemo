@@ -40,10 +40,8 @@ async function saveActiveEntry(page) {
 }
 
 async function expectVaultNameWritesReady(page) {
-  const createBase = page
-    .getByRole("complementary", { name: "Vault 리본" })
-    .getByRole("button", { name: "새 Base", exact: true });
-  await expect(createBase).toBeEnabled({ timeout: 30_000 });
+  const createNote = page.getByRole("button", { name: "새 노트", exact: true }).first();
+  await expect(createNote).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByRole("status", { name: "Vault 이름 무결성 준비" })).toHaveCount(0);
 }
 

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { RevisionedVaultIndexEntry, VaultEntryPathChange } from "../knowledge";
-import { safeCanvasDocument } from "./canvasModel";
+import { parseCanvasDocument } from "./canvasModel";
+
+function safeCanvasDocument(source: string) { return parseCanvasDocument(source).document; }
 import {
   applyCanvasPathRewritePlan,
   planCanvasPathRewritesForPathChanges

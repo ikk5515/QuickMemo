@@ -107,7 +107,7 @@ export class DuplicateLibraryItemError extends Error {
 
 const validStatuses = new Set<LibraryItemStatus>(["inbox", "reading", "archived"]);
 const validKinds = new Set<LibraryItemKind>(["link", "clip", "attachment"]);
-const vaultKeyCache = new WeakMap<CryptoKey, Map<string, CryptoKey>>();
+const vaultKeyCache = new WeakMap<CryptoKey, Map<string, Promise<CryptoKey>>>();
 const libraryDecryptConcurrency = 4;
 export const libraryInitialSubscriptionLimit = 120;
 export const librarySubscriptionStep = 120;
@@ -172,12 +172,30 @@ async function getOrCreateLibraryVaultKey(
   publicKeyJwk: JsonWebKey,
   privateKey: CryptoKey
 ) {
-  const cached = vaultKeyCache.get(privateKey)?.get(uid);
+  const keyCache = vaultKeyCache.get(privateKey) ?? new Map<string, Promise<CryptoKey>>();
+  const cached = keyCache.get(uid);
 
   if (cached) {
     return cached;
   }
 
+  // Captures can arrive together (for example, several OCR attachments). Share
+  // initialization inside the unlocked session instead of repeating RSA work
+  // and a Firestore transaction for every item. Failed attempts remain retryable.
+  const pending = createOrLoadLibraryVaultKey(uid, publicKeyJwk, privateKey).catch((error) => {
+    keyCache.delete(uid);
+    throw error;
+  });
+  keyCache.set(uid, pending);
+  vaultKeyCache.set(privateKey, keyCache);
+  return pending;
+}
+
+async function createOrLoadLibraryVaultKey(
+  uid: string,
+  publicKeyJwk: JsonWebKey,
+  privateKey: CryptoKey
+) {
   const candidateKey = await generateNoteKey();
   const candidateWrappedKey = await wrapNoteKey(candidateKey, publicKeyJwk);
   const selected = await runTransaction(db, async (transaction) => {
@@ -204,12 +222,7 @@ async function getOrCreateLibraryVaultKey(
     return { created: true, wrappedKey: candidateWrappedKey };
   });
 
-  const vaultKey = selected.created ? candidateKey : await unwrapNoteKey(selected.wrappedKey, privateKey);
-  const keyCache = vaultKeyCache.get(privateKey) ?? new Map<string, CryptoKey>();
-
-  keyCache.set(uid, vaultKey);
-  vaultKeyCache.set(privateKey, keyCache);
-  return vaultKey;
+  return selected.created ? candidateKey : unwrapNoteKey(selected.wrappedKey, privateKey);
 }
 
 function boundedLibraryPageSize(pageSize: number) {
@@ -338,20 +351,27 @@ export async function decryptLibraryItem(
 export async function decryptLibraryItems(
   items: LibraryItemSnapshot[],
   uid: string,
-  privateKey: CryptoKey
+  privateKey: CryptoKey,
+  options: { signal?: AbortSignal } = {}
 ): Promise<LibraryDecryptResult> {
+  const { signal } = options;
+  signal?.throwIfAborted();
   const decryptedByIndex = new Map<number, DecryptedLibraryItem>();
   const failedItemIds: string[] = [];
   let nextIndex = 0;
 
   async function worker() {
     while (nextIndex < items.length) {
+      signal?.throwIfAborted();
       const index = nextIndex;
       nextIndex += 1;
 
       try {
-        decryptedByIndex.set(index, await decryptLibraryItem(items[index], uid, privateKey));
+        const item = await decryptLibraryItem(items[index], uid, privateKey);
+        signal?.throwIfAborted();
+        decryptedByIndex.set(index, item);
       } catch {
+        signal?.throwIfAborted();
         failedItemIds.push(items[index].id);
       }
     }

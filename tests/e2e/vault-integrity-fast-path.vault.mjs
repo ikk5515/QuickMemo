@@ -12,8 +12,8 @@ import {
 } from "./helpers.mjs";
 
 async function expectVaultWritesReady(page) {
-  const createBase = page.getByRole("button", { name: "새 Base", exact: true }).first();
-  await expect(createBase).toBeEnabled({ timeout: 30_000 });
+  const createNote = page.getByRole("button", { name: "새 노트", exact: true }).first();
+  await expect(createNote).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByRole("status", { name: "Vault 이름 무결성 준비" })).toHaveCount(0);
 }
 

@@ -392,3 +392,22 @@ export function ownerHeaders(idToken) {
     "sec-fetch-site": "same-origin"
   };
 }
+
+// Advanced memo tools remain reachable without occupying the primary ribbon.
+export async function openVaultMoreTool(page, name) {
+  const panel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
+  await expect.poll(async () => {
+    if (await panel.isVisible()) return true;
+    const rightDrawer = page.getByRole("dialog", { name: "연결 정보", exact: true });
+    if (await rightDrawer.isVisible()) {
+      await rightDrawer.getByRole("button", { name: "오른쪽 패널 닫기" }).click();
+    }
+    const files = page.getByRole("button", { name: "파일", exact: true });
+    if (await files.isVisible()) await files.click({ timeout: 500 }).catch(() => undefined);
+    return panel.isVisible();
+  }, { message: "Memo explorer must settle open after encrypted workspace restoration" }).toBe(true);
+  await expect(panel).toBeVisible();
+  const tools = panel.locator("details.vault-more-tools");
+  if (!(await tools.evaluate((element) => element.open))) await tools.locator("summary").click();
+  await tools.getByRole("button", { name, exact: true }).click();
+}

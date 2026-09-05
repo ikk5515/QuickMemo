@@ -53,7 +53,7 @@ describe("vault workspace state", () => {
     expect(result).toEqual({ passes: 3, stable: false });
   });
 
-  it("creates Obsidian-compatible graph and panel defaults", () => {
+  it("starts with a focused memo list and optional panels collapsed", () => {
     const state = createDefaultVaultWorkspaceState();
     expect(state).toMatchObject({
       version: 1,
@@ -61,14 +61,14 @@ describe("vault workspace state", () => {
       layout: { type: "pane", groupId: "primary" },
       tabGroups: [{ id: "primary", tabs: [], activeTab: null }],
       left: { open: true, mode: "files" },
-      right: { open: true, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
+      right: { open: false, mode: "backlinks", width: DEFAULT_VAULT_RIGHT_PANEL_WIDTH },
       viewMode: "live-preview",
       bookmarks: [],
       searchBookmarks: [],
       plugins: {
         calendar: {
           folderId: null,
-          open: true,
+          open: false,
           templateEntryId: null
         }
       },
@@ -401,14 +401,14 @@ describe("vault workspace state", () => {
   });
 
   it("preserves a 280px editor while clamping the desktop right panel", () => {
-    expect(maxVaultRightPanelWidthForViewport(761, true)).toBe(267);
-    expect(maxVaultRightPanelWidthForViewport(768, true, 753)).toBe(259);
-    expect(maxVaultRightPanelWidthForViewport(900, true)).toBe(406);
-    expect(maxVaultRightPanelWidthForViewport(901, true)).toBe(347);
-    expect(maxVaultRightPanelWidthForViewport(761, false)).toBe(437);
+    expect(maxVaultRightPanelWidthForViewport(761, true)).toBe(250);
+    expect(maxVaultRightPanelWidthForViewport(768, true, 753)).toBe(250);
+    expect(maxVaultRightPanelWidthForViewport(900, true)).toBe(386);
+    expect(maxVaultRightPanelWidthForViewport(901, true)).toBe(327);
+    expect(maxVaultRightPanelWidthForViewport(761, false)).toBe(417);
     expect(maxVaultRightPanelWidthForViewport(1_440, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
-    expect(clampVaultRightPanelWidthForViewport(480, 761, true)).toBe(267);
-    expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(259);
+    expect(clampVaultRightPanelWidthForViewport(480, 761, true)).toBe(250);
+    expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(250);
     expect(clampVaultRightPanelWidthForViewport(200, 761, true)).toBe(MIN_VAULT_RIGHT_PANEL_WIDTH);
     expect(maxVaultRightPanelWidthForViewport(390, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
   });

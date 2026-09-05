@@ -87,7 +87,8 @@ describe("schedule UI styles", () => {
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.admin-user-card,[\s\S]*html\[data-theme="dark"\] \.admin-note-card,[\s\S]*background: var\(--color-surface\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.recurring-habit-row,[\s\S]*html\[data-theme="dark"\] \.recurring-overview-item,[\s\S]*background: var\(--color-surface\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.pdf-preview-canvas-frame,[\s\S]*html\[data-theme="dark"\] \.public-image-preview-frame \{[\s\S]*background: var\(--color-app-bg\);/);
-    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.auth-page,[\s\S]*html\[data-theme="dark"\] \.public-share-page \{[\s\S]*var\(--color-app-bg\);/);
+    expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.auth-page:not\(\.login-layout\),[\s\S]*html\[data-theme="dark"\] \.public-share-page \{[\s\S]*var\(--color-app-bg\);/);
+    expect(stylesSource).toMatch(/\.login-layout\.auth-page \{[^}]*background: var\(--color-app-bg\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.schedule-color-picker input\[type="color"\] \{[\s\S]*background: var\(--color-input-bg\);/);
     expect(stylesSource).toMatch(/html\[data-theme="dark"\] \.empty-state,[\s\S]*html\[data-theme="dark"\] \.note-empty-state,[\s\S]*background: var\(--color-surface-hover\);/);
   });

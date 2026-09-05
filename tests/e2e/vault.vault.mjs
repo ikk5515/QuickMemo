@@ -8,6 +8,7 @@ import {
   loginDirectly,
   navigateWithinApp,
   observePage,
+  openVaultMoreTool,
   seedScenario,
   unlockEncryptedVault
 } from "./helpers.mjs";
@@ -330,7 +331,7 @@ test("authenticated encrypted Vault works across the supported responsive widths
     expect(titleBounds?.width ?? 0, "mobile note title must keep a practical editing width").toBeGreaterThanOrEqual(180);
   }
 
-  await page.getByRole("button", { name: "그래프 보기", exact: true }).click();
+  await openVaultMoreTool(page, "그래프 보기");
   let graph = page.getByRole("region", { name: "전체 그래프" });
   await expect(graph).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "그래프 화면 제어" })).toBeVisible();
@@ -405,9 +406,10 @@ test("authenticated encrypted Vault works across the supported responsive widths
   await expectNoHorizontalOverflow(page);
 
   await navigateWithinApp(page, "/library");
-  await page.getByRole("link", { name: "그래프 보기" }).click();
+  await page.getByRole("link", { name: "메모", exact: true }).click();
+  await openVaultMoreTool(page, "그래프 보기");
   await expect(page).toHaveURL((url) => (
-    url.pathname === "/app" && url.searchParams.get("view") === "graph"
+    url.pathname === "/app"
   ));
   await expect(page.getByRole("region", { name: "전체 그래프" })).toBeVisible();
   await expectNoHorizontalOverflow(page);

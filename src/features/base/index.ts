@@ -1,5 +1,3 @@
-export { BaseView } from "./BaseView";
-export type { BaseViewProps } from "./BaseView";
 export {
   basePropertyDisplayName,
   basePropertyValue,

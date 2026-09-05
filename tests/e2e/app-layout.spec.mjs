@@ -138,18 +138,14 @@ test("authenticated app layouts keep controls contained across primary routes", 
   const fixture = await seedScenario(request, "authenticated-verified");
   const viewportWidth = page.viewportSize()?.width ?? 1280;
   const touchLayout = viewportWidth <= 1024;
-  const mobileRibbon = viewportWidth <= 760;
 
   await loginDirectly(page, fixture.viewerAuth);
 
   await expect(page).toHaveURL((url) => url.pathname === "/app" && url.searchParams.get("panel") === "files");
   const workspaceRibbon = page.getByRole("complementary", { name: "작업공간 리본" });
   await expect(workspaceRibbon).toBeVisible();
-  await expect(page.getByRole("link", { name: "파일 탐색기" })).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("link", { name: "메모", exact: true })).toHaveAttribute("aria-current", "page");
   await expect(page.locator(".note-drawer")).toBeVisible();
-  if (!mobileRibbon) {
-    await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
-  }
   await expectNoHorizontalOverflow(page);
   if (touchLayout) {
     await expectTopbarControlsDoNotOverlap(page);
@@ -293,15 +289,16 @@ test("setup, login, and admin layouts stay contained across responsive widths", 
   const viewportWidth = page.viewportSize()?.width ?? 1280;
   await page.goto("/login");
   await expect(
-    page.getByRole("heading", { name: /사용자를 선택하고/u })
+    page.getByRole("heading", { name: /가볍게 기록하고/u })
   ).toBeVisible();
   await expectNoHorizontalOverflow(page);
   await expectInside(page, ".login-layout", ".login-copy", "login copy");
   await expectInside(page, ".login-layout", ".roster-panel", "login roster");
 
   await loginDirectly(page, fixture.viewerAuth);
-  await expect(page.locator('[data-workspace-section="admin"]')).toHaveCount(1);
-  await navigateWithinApp(page, "/admin");
+  await expect(page.getByRole("navigation", { name: "주요 메뉴" }).getByRole("link", { name: "관리자", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "작업공간 메뉴 열기", exact: true }).click();
+  await page.getByRole("dialog", { name: "QuickMemo 작업공간 메뉴" }).getByRole("link", { name: "관리자", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "관리자 설정", exact: true })
   ).toBeVisible();

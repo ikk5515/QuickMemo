@@ -83,6 +83,18 @@ describe("LoginPage library capture handoff", () => {
     });
   });
 
+  it.each([
+    { ...userProfile, isActive: false },
+    { ...userProfile, uid: "other-user" }
+  ])("keeps inactive or mismatched profiles on login instead of redirecting back to a rejected route", (profile) => {
+    mocks.firebaseUser = { uid: rosterUser.uid } as User;
+    mocks.profile = profile;
+    renderLogin(["/login"]);
+
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+    expect(screen.getByRole("heading", { name: "로그인" })).toBeInTheDocument();
+  });
+
   it("returns a validated state handoff to the fixed library route after login", async () => {
     const user = userEvent.setup();
     const nonce = "A".repeat(43);
@@ -310,4 +322,27 @@ describe("LoginPage library capture handoff", () => {
     await user.type(passwordInput, "x");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
+
+  it("keeps the password dialog mounted when cancellation is attempted during private-key unlock", async () => {
+    const user = userEvent.setup();
+    let resolveLogin!: (profile: UserProfile) => void;
+    mocks.loginRosterUser.mockReturnValueOnce(new Promise<UserProfile>((resolve) => {
+      resolveLogin = resolve;
+    }));
+    renderLogin(["/login"]);
+    await user.click(await screen.findByRole("button", { name: "사용자 사용자 선택" }));
+    await user.type(screen.getByLabelText("비밀번호"), "password");
+    await user.click(screen.getByRole("button", { name: "로그인" }));
+
+    expect(screen.getByRole("button", { name: "취소" })).toBeDisabled();
+    expect(screen.getByLabelText("비밀번호")).toBeDisabled();
+    await user.keyboard("{Escape}");
+    fireEvent.mouseDown(screen.getByRole("dialog").parentElement!);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent(/^\/login$/);
+
+    resolveLogin(userProfile);
+    await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent(/^\/home$/));
+  });
+
 });

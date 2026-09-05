@@ -1,5 +1,7 @@
 # QuickMemo Bases compatibility contract
 
+> 2026-09-05 변경: Base·Kanban·Canvas 생성 및 전용 편집 화면은 제거되었습니다. 아래 호환성 기록 중 해당 UI 설명은 과거 구현에 대한 기록입니다. 기존 암호화 파일의 원문 열람·내보내기와 안전한 파싱 경로만 유지합니다. 현재 사용자 기능은 [README](../README.md)를 참고하세요.
+
 This document records the exact client-side Bases surface implemented for the
 Obsidian Core 1.13.7 compatibility target. The reference behavior comes from
 the official [Bases syntax](https://github.com/obsidianmd/obsidian-help/blob/master/en/Bases/Bases%20syntax.md)

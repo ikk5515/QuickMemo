@@ -21,10 +21,10 @@ describe("Vault tablet sidebar layout contract", () => {
     expect(tabletStart).toBeGreaterThanOrEqual(0);
     expect(touchStart).toBeGreaterThan(tabletStart);
     expect(ruleBodiesForSelector(tabletStyles, ".vault-workspace")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(195px, 230px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
+      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(195px, 230px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(tabletStyles, ".vault-workspace.vault-left-closed")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
+      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(tabletStyles, ".vault-right-panel")).toEqual(expect.arrayContaining([
       expect.stringMatching(/max-width:\s*none;[\s\S]*position:\s*relative;[\s\S]*width:\s*auto;/u)
@@ -62,10 +62,10 @@ describe("Vault tablet sidebar layout contract", () => {
     expect(compactStart).toBeGreaterThanOrEqual(0);
     expect(splitStart).toBeGreaterThan(compactStart);
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(150px, 170px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
+      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(150px, 170px\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-workspace.vault-left-closed")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-columns:\s*44px minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
+      expect.stringMatching(/grid-template-columns:\s*var\(--vault-rail-size\) minmax\(0, 1fr\) var\(--vault-right-panel-size\);/u)
     ]));
     expect(ruleBodiesForSelector(compactStyles, ".vault-right-panel > header")).toEqual(expect.arrayContaining([
       expect.stringMatching(/min-height:\s*48px;/u)

@@ -522,6 +522,11 @@ export async function loadVaultImportJob(uid: string, privateKey: CryptoKey, job
   return loaded ? summary(loaded.stored, jobId, loaded.manifest) : null;
 }
 
+async function importJobBecameTerminal(uid: string, jobId: string) {
+  const current = await loadStoredJob(uid, jobId);
+  return !current || current.stored.status === "committed" || current.stored.status === "rolled-back";
+}
+
 export async function listRecoverableVaultImportJobs(uid: string, privateKey: CryptoKey) {
   const validatedUid = validateUid(uid);
   const snapshot = await getDocsFromServer(query(
@@ -537,14 +542,24 @@ export async function listRecoverableVaultImportJobs(uid: string, privateKey: Cr
     validateJobId(document.id);
     const stored = validateStoredJob(document.data(), validatedUid);
     const key = await unwrapNoteKey(stored.wrappedKey, privateKey);
-    const manifest = await readManifest(
-      document.ref,
-      stored,
-      validatedUid,
-      document.id,
-      key,
-      stored.status === "preparing"
-    );
+    let manifest: VaultImportManifestV1 | null;
+    try {
+      manifest = await readManifest(
+        document.ref,
+        stored,
+        validatedUid,
+        document.id,
+        key,
+        stored.status === "preparing"
+      );
+    } catch (error) {
+      // Another tab can finish an import and remove its terminal chunks after
+      // the query returned an active job. Only a fresh server read proving it
+      // completed/disappeared may dismiss that race; active corruption fails.
+      if (await importJobBecameTerminal(validatedUid, document.id)) continue;
+      throw error;
+    }
+    if (await importJobBecameTerminal(validatedUid, document.id)) continue;
     jobs.push(summary(stored, document.id, manifest));
   }
   return jobs;

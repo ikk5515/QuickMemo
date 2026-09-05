@@ -13,11 +13,8 @@ import {
 
 const firestoreProjectId = "quickmemo-share-api-test";
 const drawingSecret = "E2E_DRAWING_PLAINTEXT_7d21";
-const kanbanSecret = "E2E_KANBAN_PLAINTEXT_8a42";
 const dataviewSecret = "E2E_DATAVIEW_PLAINTEXT_4e63";
 const templateSecret = "E2E_TEMPLATE_PLAINTEXT_9c84";
-const baseSourceSecret = "E2E_BASE_SOURCE_PLAINTEXT_5b73";
-const baseDefinitionSecret = "E2E_BASE_DEFINITION_PLAINTEXT_6c84";
 const recoveryV1Secret = "E2E_RECOVERY_V1_PLAINTEXT_1d95";
 const recoveryV2Secret = "E2E_RECOVERY_V2_PLAINTEXT_2ea6";
 const generatedTitle = "E2E 템플릿 결과";
@@ -90,8 +87,8 @@ async function expectVaultNameWritesReady(page) {
   // active accessibility surface so this readiness assertion covers both
   // valid drawer states instead of mistaking correct modal isolation for a
   // missing Vault shell.
-  const createBase = page.getByRole("button", { name: "새 Base", exact: true }).first();
-  await expect(createBase).toBeEnabled({ timeout: 30_000 });
+  const createNote = page.getByRole("button", { name: "새 노트", exact: true }).first();
+  await expect(createNote).toBeEnabled({ timeout: 30_000 });
   await expect(page.getByRole("status", { name: "Vault 이름 무결성 준비" })).toHaveCount(0);
 }
 
@@ -279,8 +276,8 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     const drawer = await ensureLeftPanel(page);
     await expect(drawer).toHaveAttribute("role", "dialog");
     await expect(drawer).toHaveAttribute("aria-modal", "true");
-    const drawerControls = drawer.locator('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]');
-    await drawerControls.last().focus();
+    const drawerControls = drawer.locator('summary, button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href]');
+    await drawerControls.filter({ visible: true }).last().focus();
     await page.keyboard.press("Tab");
     await expect(drawer.getByRole("button", { name: "왼쪽 패널 닫기" })).toBeFocused();
     await page.keyboard.press("Escape");
@@ -291,7 +288,7 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await expect(page.getByRole("dialog", { name: "Vault 탐색기" })).toBeVisible();
   } else {
     await expect(page.getByRole("complementary", { name: "Vault 리본" })).toBeVisible();
-    for (const tool of ["새 QuickMemo Drawing", "새 Kanban", "명령 팔레트"]) {
+    for (const tool of ["파일", "검색", "명령 팔레트"]) {
       await expect(page.getByRole("button", { name: tool, exact: true })).toBeVisible();
     }
   }
@@ -301,12 +298,14 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     const panel = await ensureLeftPanel(page);
     let calendar;
     if (mobileLayout) {
-      await panel.getByRole("button", { name: /Daily Notes/u }).click();
+      await panel.getByRole("button", { name: "날짜별 메모", exact: true }).click();
       calendar = page.getByRole("dialog", { name: "Daily Notes 달력" });
       await expect(calendar).toBeVisible();
       await expect(calendar.getByRole("button", { name: "Daily Notes 달력 닫기" })).toBeFocused();
       await expectMobileButtonTargets(calendar, "Daily Notes calendar");
     } else {
+      const toggle = panel.locator(".vault-calendar-toggle");
+      if (await toggle.getAttribute("aria-expanded") !== "true") await toggle.click();
       calendar = panel.locator(".qm-daily-calendar");
       await expect(calendar).toBeVisible();
     }
@@ -334,50 +333,15 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     entryIds.daily = await activeEntryId(page);
     if (mobileLayout) {
       await expect(page.getByRole("complementary", { name: "Vault 리본" })).toBeVisible();
-      for (const tool of ["새 QuickMemo Drawing", "새 Kanban", "명령 팔레트"]) {
+      for (const tool of ["파일", "검색", "명령 팔레트"]) {
         await expect(page.getByRole("button", { name: tool, exact: true })).toBeVisible();
       }
     }
     await expectPageViewportContained(page);
   });
 
-  await test.step("Canvas accepts an ACL-resolved file-tree drop without exposing a path in drag data", async () => {
-    const createCanvas = page
-      .getByRole("complementary", { name: "Vault 리본" })
-      .getByRole("button", { name: "새 Canvas", exact: true });
-    await expect(createCanvas).toBeEnabled();
-    await createCanvas.click();
-    await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue("새 캔버스");
-    const canvas = page.getByRole("region", { name: "Canvas" });
-    await expect(canvas).toBeVisible();
-
-    if (mobileLayout) {
-      await canvas.getByRole("button", { name: "추가할 노트 선택" }).click();
-      const chooser = page.getByRole("dialog", { name: "Canvas 파일 선택" });
-      await chooser.getByRole("button", { name: new RegExp(todayKey, "u") }).first().click();
-      await canvas.getByRole("button", { name: "선택한 노트 카드 추가" }).click();
-    } else {
-      const panel = await ensureLeftPanel(page);
-      const source = panel.getByRole("treeitem", { name: todayKey, exact: true });
-      const target = canvas.locator(".react-flow__pane");
-      const targetBox = await target.boundingBox();
-      expect(targetBox).not.toBeNull();
-      await source.dragTo(target, {
-        targetPosition: {
-          x: Math.min(300, Math.max(24, targetBox.width - 24)),
-          y: Math.min(260, Math.max(24, targetBox.height - 24))
-        }
-      });
-    }
-
-    await expect(canvas.getByRole("article", { name: new RegExp(`Canvas 카드: .*${todayKey}`, "u") })).toBeVisible();
-    await saveActiveEntry(page);
-    entryIds.canvas = await activeEntryId(page);
-    await expectPageViewportContained(page);
-  });
-
   await test.step("Drawing edits through the visual canvas and survives encrypted save", async () => {
-    await page.getByRole("button", { name: "새 QuickMemo Drawing", exact: true }).click();
+    await openCommand(page, "새 드로잉 만들기");
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue("새 드로잉");
     await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
     const drawing = page.getByRole("region", { name: "QuickMemo Drawing beta" });
@@ -396,33 +360,6 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await saveActiveEntry(page);
     entryIds.drawing = await activeEntryId(page);
     if (mobileLayout) await expectMobileButtonTargets(drawing, "Drawing toolbar");
-    await expectPageViewportContained(page);
-  });
-
-  await test.step("Kanban creates, completes, and moves a card without leaving Markdown", async () => {
-    await page.getByRole("button", { name: "새 Kanban", exact: true }).click();
-    await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue("새 Kanban");
-    await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
-    const kanban = page.getByRole("region", { name: "새 Kanban Kanban" });
-    await expect(kanban).toBeVisible();
-    const firstColumn = kanban.locator(".qm-kanban-column").first();
-    const addCardInput = firstColumn.getByLabel("할 일에 카드 추가");
-    const addCardButton = firstColumn.getByRole("button", { name: "카드 추가" });
-    await addCardInput.fill(kanbanSecret);
-    await expect(addCardButton).toBeEnabled();
-    await addCardInput.press("Enter");
-    await expect(addCardInput).toHaveValue("");
-    const card = kanban.getByRole("textbox", { name: "카드 내용" });
-    await expect(card).toHaveValue(kanbanSecret);
-    const completeCard = kanban.getByLabel(`${kanbanSecret} 완료`);
-    await expectPointerTarget(completeCard, "Kanban completion checkbox");
-    await completeCard.check();
-    await kanban.getByLabel("카드 열 이동").selectOption("1");
-    await expect(kanban.locator(".qm-kanban-column").nth(1).getByRole("textbox", { name: "카드 내용" }))
-      .toHaveValue(kanbanSecret);
-    await saveActiveEntry(page);
-    entryIds.kanban = await activeEntryId(page);
-    if (mobileLayout) await expectMobileButtonTargets(kanban, "Kanban board");
     await expectPageViewportContained(page);
   });
 
@@ -533,23 +470,18 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
 
   await test.step("every built-in artifact is ciphertext at rest", async () => {
     await expectEncryptedEntry(request, fixture, entryIds.daily, [`# ${todayKey}`]);
-    // The bare YYYY-MM-DD also appears in server timestamps. Assert the
-    // canonical Canvas file reference is absent instead of matching metadata.
-    await expectEncryptedEntry(request, fixture, entryIds.canvas, [`${todayKey}.md`], "json-canvas-v1");
     await expectEncryptedEntry(request, fixture, entryIds.drawing, [drawingSecret, "quickmemo-plugin: drawing-v1"]);
-    await expectEncryptedEntry(request, fixture, entryIds.kanban, [kanbanSecret, "quickmemo-plugin: kanban-v1"]);
     await expectEncryptedEntry(request, fixture, entryIds.dataview, [dataviewSecret, "globalThis.__quickmemoDataviewE2E"]);
     await expectEncryptedEntry(request, fixture, entryIds.template, [templateSecret, "globalThis.__quickmemoTemplateE2E"]);
     await expectEncryptedEntry(request, fixture, entryIds.generated, [generatedTitle, templateSecret]);
   });
 
-  await test.step("reload locks plaintext, then restores persisted Drawing and Kanban content", async () => {
+  await test.step("reload locks plaintext, then restores persisted content", async () => {
     await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved");
     await page.reload();
     await expect(page.locator('input[type="password"][aria-label="비밀번호"]')).toBeVisible();
     for (const plaintext of [
       drawingSecret,
-      kanbanSecret,
       dataviewSecret,
       templateSecret
     ]) {
@@ -577,11 +509,6 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
     await expect(page.getByRole("application", { name: "Drawing 캔버스" }).locator("text")).toContainText(drawingSecret);
 
-    panel = await ensureLeftPanel(page);
-    await panel.getByRole("treeitem", { name: "새 Kanban", exact: true }).click();
-    await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
-    await expect(page.getByRole("region", { name: "새 Kanban Kanban" }).getByRole("textbox", { name: "카드 내용" }))
-      .toHaveValue(kanbanSecret);
     await expectPageViewportContained(page);
   });
 
@@ -590,120 +517,9 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
   }
   await expectCleanRuntime(diagnostics, fixture, [
     drawingSecret,
-    kanbanSecret,
     dataviewSecret,
     templateSecret
   ]);
-});
-
-test("Bases switches views, writes through Properties, and persists only ciphertext", async ({
-  browserName,
-  page,
-  request
-}, testInfo) => {
-  test.skip(
-    !focusedBuiltInAcceptanceProjects.has(testInfo.project.name),
-    "Bases acceptance runs on the bounded Chromium/WebKit desktop-1280 and mobile-390 matrix."
-  );
-  test.setTimeout(120_000);
-  const diagnostics = observePage(page);
-  const fixture = await seedScenario(request, "authenticated-verified");
-  const mobileLayout = (page.viewportSize()?.width ?? 1280) <= 760;
-  const source = [
-    "---",
-    "status: todo",
-    "score: 1",
-    "active: false",
-    "---",
-    "# E2E Base Source",
-    "",
-    baseSourceSecret
-  ].join("\n");
-  const baseYaml = [
-    'filters: \'file.name == "E2E Base Source"\'',
-    "formulas:",
-    "  doubled: score * 2",
-    `  marker: '"${baseDefinitionSecret}"'`,
-    "properties:",
-    "  status:",
-    "    displayName: 상태",
-    "  score:",
-    "    displayName: 점수",
-    "  active:",
-    "    displayName: 활성",
-    "views:",
-    "  - type: table",
-    "    name: E2E 표",
-    "    order: [file.name, status, score, active, formula.doubled, formula.marker]",
-    "    summaries:",
-    "      status: Unique",
-    "  - type: cards",
-    "    name: E2E 카드",
-    "    order: [file.name, status, formula.marker]",
-    "  - type: list",
-    "    name: E2E 목록",
-    "    order: [file.name, status]"
-  ].join("\n");
-
-  await loginDirectly(page, fixture.viewerAuth, diagnostics);
-  await navigateWithinApp(page, "/app");
-  await expectVaultNameWritesReady(page);
-  const panel = await ensureLeftPanel(page);
-  await panel.locator('.vault-panel-toolbar button[aria-label="새 노트"]').click();
-  await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("E2E Base Source");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
-  await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(source);
-  await saveActiveEntry(page);
-  const sourceEntryId = await activeEntryId(page);
-
-  const createBase = page.getByRole("button", { name: "새 Base", exact: true }).first();
-  await expect(createBase).toBeEnabled();
-  await createBase.click();
-  await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("E2E Base Dashboard");
-  const baseEditorDetails = page.locator(".vault-base-view details");
-  await baseEditorDetails.getByText("Base YAML 편집", { exact: true }).click();
-  await baseEditorDetails.getByRole("textbox", { name: "Markdown 편집기" }).fill(baseYaml);
-  await saveActiveEntry(page);
-  const baseEntryId = await activeEntryId(page);
-
-  let base = page.getByRole("region", { name: "E2E 표 Base" });
-  const table = base.getByRole("table", { name: "E2E 표" });
-  const sourceRow = table.getByRole("row").filter({ hasText: "E2E Base Source" });
-  await expect(sourceRow).toContainText(baseDefinitionSecret);
-  await expect(sourceRow).toContainText("2");
-  const status = sourceRow.getByRole("textbox", { name: "E2E Base Source — 상태 속성" });
-  const revisionBeforeEdit = await encryptedEntryRevision(request, fixture, sourceEntryId);
-  await status.fill("done");
-  await status.blur();
-  await expect.poll(() => encryptedEntryRevision(request, fixture, sourceEntryId), {
-    message: "Base property write-through must create a newer encrypted source-note revision"
-  }).toBeGreaterThan(revisionBeforeEdit);
-  await expect(status).toHaveValue("done");
-
-  await base.getByRole("combobox", { name: "Base 보기" }).selectOption("E2E 카드");
-  base = page.getByRole("region", { name: "E2E 카드 Base" });
-  await expect(base.getByRole("list", { name: "E2E 카드 카드" })).toContainText("E2E Base Source");
-  await base.getByRole("combobox", { name: "Base 보기" }).selectOption("E2E 목록");
-  base = page.getByRole("region", { name: "E2E 목록 Base" });
-  await expect(base.getByRole("textbox", { name: "E2E Base Source — 상태 속성" })).toHaveValue("done");
-  if (mobileLayout) await expectMobileButtonTargets(base, "Base view");
-  await expectPageViewportContained(page);
-
-  await expectEncryptedEntry(request, fixture, sourceEntryId, [baseSourceSecret, "status: done"]);
-  await expectEncryptedEntry(request, fixture, baseEntryId, [baseDefinitionSecret], "base-v1");
-  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved");
-  await page.reload();
-  await expect(page.locator('input[type="password"][aria-label="비밀번호"]')).toBeVisible();
-  await expect(page.locator("body")).not.toContainText(baseSourceSecret);
-  await expect(page.locator("body")).not.toContainText(baseDefinitionSecret);
-  await unlockEncryptedVault(page, fixture.viewerAuth.password);
-  base = page.getByRole("region", { name: "E2E 표 Base" });
-  await expect(base).toBeVisible();
-  await expect(base.getByRole("textbox", { name: "E2E Base Source — 상태 속성" })).toHaveValue("done");
-  await expectPageViewportContained(page);
-
-  if (browserName === "webkit") allowExpectedWebKitFirestoreEmulatorUnloadErrors(diagnostics);
-  await expectCleanRuntime(diagnostics, fixture, [baseSourceSecret, baseDefinitionSecret]);
 });
 
 test("File Recovery restores an old body as a new encrypted revision", async ({

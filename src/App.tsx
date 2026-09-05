@@ -145,7 +145,7 @@ export function RequireAuth({
     return <PageLoadingFallback />;
   }
 
-  if (!firebaseUser || !profile) {
+  if (!firebaseUser || !profile || profile.uid !== firebaseUser.uid || !profile.isActive) {
     let captureLoginState;
     try {
       captureLoginState = createLibraryCaptureLoginState(location.pathname, location.hash);

@@ -9,12 +9,13 @@ const commandPaletteSource = readFileSync(
 );
 
 describe("VaultPage built-in knowledge tool wiring", () => {
-  it("keeps heavy Dataview, Drawing and Kanban views lazy-loaded", () => {
+  it("keeps active knowledge tools lazy and removes retired editor chunks", () => {
     expect(source).toContain('const LazyDataviewBlock = lazy(');
     expect(source).toContain('const LazyDrawingView = lazy(');
-    expect(source).toContain('const LazyKanbanBoard = lazy(');
+    expect(source).not.toContain('LazyKanbanBoard');
+    expect(source).not.toContain('LazyBaseView');
+    expect(source).not.toContain('LazyVaultJsonCanvasPane');
     expect(source).toContain('<LazyDrawingView');
-    expect(source).toContain('<LazyKanbanBoard');
   });
 
   it("lazy-loads and mounts the six Core workflow tools inside the unlocked Vault", () => {
@@ -100,11 +101,15 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     expect(source).toContain("createdAt: node.createdAt");
   });
 
-  it("exposes Drawing and Kanban creation through commands and the ribbon", () => {
+  it("keeps Drawing in commands and removes retired file creation actions", () => {
     expect(commandPaletteSource).toContain('{ id: "new-drawing"');
-    expect(commandPaletteSource).toContain('{ id: "new-kanban"');
-    expect(source).toContain('aria-label="새 QuickMemo Drawing"');
-    expect(source).toContain('aria-label="새 Kanban"');
+    for (const kind of ["new-canvas", "new-base", "new-kanban"]) {
+      expect(commandPaletteSource).not.toContain(`{ id: "${kind}"`);
+      expect(source).not.toContain(`case "${kind}"`);
+    }
+    expect(source).not.toContain('aria-label="새 Canvas"');
+    expect(source).not.toContain('aria-label="새 Base"');
+    expect(source).not.toContain('aria-label="새 Kanban"');
     expect(source).not.toContain('"새 드로잉.excalidraw"');
   });
 
@@ -118,9 +123,9 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     expect(source).toContain('case "create-search-index": void createIndexFromCurrentSearch()');
   });
 
-  it("connects editable Bases, Kanban source-note links and encrypted File Recovery", () => {
-    expect(source).toContain("onEditProperty={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked ? undefined : editBaseProperty}");
-    expect(source).toContain("onOpenLink={openKanbanLink}");
+  it("preserves retired file originals and encrypted File Recovery", () => {
+    expect(source).toContain("<VaultArchivedFilePreview");
+    expect(source).toContain('activeNote.entryKind === "canvas" || activeNote.entryKind === "base"');
     expect(source).toContain("<LazyVaultHistoryPanel");
     expect(source).toContain('{ icon: History, label: "File Recovery", mode: "history" }');
     expect(source).toContain(") : activeNote ? (");

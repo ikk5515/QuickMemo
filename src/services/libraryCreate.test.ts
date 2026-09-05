@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createLibraryItem, DuplicateLibraryItemError } from "./library";
+import { createLibraryItem, decryptLibraryItems, DuplicateLibraryItemError, type LibraryItemSnapshot } from "./library";
 import type { LibraryItemContent } from "../types";
 
 const firestoreMocks = vi.hoisted(() => {
@@ -149,6 +149,83 @@ describe("library create persistence", () => {
       expect.objectContaining({ ownerUid: "user-a", revision: 1 })
     );
     expect(firestoreMocks.getDoc).not.toHaveBeenCalled();
+  });
+
+
+  it("shares one vault transaction and key initialization across 24 simultaneous captures", async () => {
+    const input = createInput();
+    await Promise.all(Array.from({ length: 24 }, () => createLibraryItem(input)));
+
+    expect(firestoreMocks.runTransaction).toHaveBeenCalledOnce();
+    expect(cryptoMocks.generateNoteKey).toHaveBeenCalledTimes(25);
+    expect(cryptoMocks.wrapNoteKey).toHaveBeenCalledTimes(25);
+    expect(firestoreMocks.setDoc).toHaveBeenCalledTimes(24);
+
+    await createLibraryItem(input);
+    expect(firestoreMocks.runTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("retries vault initialization after a failed transaction", async () => {
+    const input = createInput();
+    firestoreMocks.runTransaction.mockRejectedValueOnce(new Error("unavailable"));
+
+    await expect(createLibraryItem(input)).rejects.toThrow("unavailable");
+    await expect(createLibraryItem(input)).resolves.toMatchObject({ revision: 1 });
+    expect(firestoreMocks.runTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("isolates cached vault initialization by both user and unlocked private key", async () => {
+    const input = createInput();
+    await Promise.all([
+      createLibraryItem(input),
+      createLibraryItem({ ...input, uid: "user-b" }),
+      createLibraryItem({ ...input, privateKey: {} as CryptoKey })
+    ]);
+
+    expect(firestoreMocks.runTransaction).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops a cancelled 120-item decrypt after the four already running items", async () => {
+    const controller = new AbortController();
+    const resolvers: ((key: CryptoKey) => void)[] = [];
+    cryptoMocks.unwrapNoteKey.mockImplementation(() => new Promise<CryptoKey>((resolve) => {
+      resolvers.push(resolve);
+    }));
+    contentMocks.decryptLibraryItemContent.mockResolvedValue(content);
+    const items = Array.from({ length: 120 }, (_, index): LibraryItemSnapshot => ({
+      id: `item-${index}`,
+      ownerUid: "user-a",
+      generationId: `generation-${index}`,
+      kind: "link",
+      status: "inbox",
+      captureSource: "manual",
+      isFavorite: false,
+      urlFingerprint: `fingerprint-${index}`,
+      sourceNoteId: null,
+      sourceAttachmentId: null,
+      revision: 1,
+      lastMutationId: `mutation-${index}`,
+      reviewCount: 0,
+      wrappedKeys: { "user-a": { algorithm: "RSA-OAEP", version: 1, wrappedKey: "wrapped" } },
+      encryptedContent: { algorithm: "AES-GCM", version: 1, iv: "iv", cipherText: "cipher" }
+    }));
+    const result = decryptLibraryItems(items, "user-a", {} as CryptoKey, { signal: controller.signal });
+    const rejected = expect(result).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(cryptoMocks.unwrapNoteKey).toHaveBeenCalledTimes(4);
+    controller.abort();
+    resolvers.forEach((resolve) => resolve({} as CryptoKey));
+    await rejected;
+    expect(cryptoMocks.unwrapNoteKey).toHaveBeenCalledTimes(4);
+  });
+
+  it("does no crypto work for a list that was already cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(decryptLibraryItems([], "user-a", {} as CryptoKey, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(cryptoMocks.unwrapNoteKey).not.toHaveBeenCalled();
   });
 
   it("maps an update-denied deterministic collision to a duplicate only after an owned read", async () => {

@@ -22,7 +22,8 @@ const scheduleOnlyProfile: UserProfile = {
 
 const authState = vi.hoisted(() => ({
   privateKey: {} as CryptoKey | null,
-  profile: null as UserProfile | null
+  profile: null as UserProfile | null,
+  signOut: vi.fn()
 }));
 const preloadMocks = vi.hoisted(() => ({
   preloadProtectedRoute: vi.fn()
@@ -33,7 +34,7 @@ vi.mock("../context/AuthContext", () => ({
     changePassword: vi.fn(),
     privateKey: authState.privateKey,
     profile: authState.profile,
-    signOut: vi.fn()
+    signOut: authState.signOut
   })
 }));
 
@@ -58,6 +59,7 @@ describe("AppShell feature navigation", () => {
     authState.privateKey = {} as CryptoKey;
     authState.profile = scheduleOnlyProfile;
     preloadMocks.preloadProtectedRoute.mockClear();
+    authState.signOut.mockReset().mockResolvedValue(undefined);
   });
 
   it("only exposes navigation granted to the current live profile", () => {
@@ -70,8 +72,8 @@ describe("AppShell feature navigation", () => {
     );
 
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
-    expect(within(navigation).getByRole("link", { name: "일정관리" })).toHaveAttribute("href", "/schedule");
-    expect(within(navigation).queryByRole("link", { name: /파일 탐색기|노트 검색/ })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("link", { name: "일정" })).toHaveAttribute("href", "/schedule");
+    expect(within(navigation).queryByRole("link", { name: "메모" })).not.toBeInTheDocument();
     expect(within(navigation).queryByRole("link", { name: "자료실" })).not.toBeInTheDocument();
   });
 
@@ -85,7 +87,7 @@ describe("AppShell feature navigation", () => {
     );
 
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
-    const scheduleLink = within(navigation).getByRole("link", { name: "일정관리" });
+    const scheduleLink = within(navigation).getByRole("link", { name: "일정" });
 
     fireEvent.pointerEnter(scheduleLink);
     fireEvent.focus(scheduleLink);
@@ -124,7 +126,7 @@ describe("AppShell feature navigation", () => {
     expect(screen.queryByRole("dialog", { name: "QuickMemo 작업공간 메뉴" })).not.toBeInTheDocument();
   });
 
-  it("keeps the unverified Graph surface disabled without marking it active", () => {
+  it("keeps legacy deep links under the single memo destination", () => {
     authState.profile = {
       ...scheduleOnlyProfile,
       featureAccess: { notes: true, library: false, schedule: false }
@@ -139,8 +141,9 @@ describe("AppShell feature navigation", () => {
     );
 
     const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
-    expect(within(navigation).getByRole("button", { name: "그래프 보기 (비활성)" })).toBeDisabled();
-    expect(within(navigation).getByRole("link", { name: "파일 탐색기" })).toHaveAttribute("aria-current", "page");
+    expect(within(navigation).queryByRole("button", { name: /그래프/ })).not.toBeInTheDocument();
+    expect(within(navigation).getAllByRole("link")).toHaveLength(1);
+    expect(within(navigation).getByRole("link", { name: "메모" })).toHaveAttribute("aria-current", "page");
   });
 
   it("keeps the mobile password action named and contains focus until the dialog closes", async () => {
@@ -154,6 +157,8 @@ describe("AppShell feature navigation", () => {
       </MemoryRouter>
     );
 
+    const menuTrigger = screen.getByRole("button", { name: "작업공간 메뉴 열기" });
+    await user.click(menuTrigger);
     const trigger = screen.getByRole("button", { name: "비밀번호 변경" });
     expect(trigger).toHaveAttribute("aria-label", "비밀번호 변경");
     expect(trigger).toHaveAttribute("title", "비밀번호 변경");
@@ -169,7 +174,7 @@ describe("AppShell feature navigation", () => {
     expect(screen.getByRole("button", { name: "변경" })).toHaveFocus();
 
     await user.keyboard("{Escape}");
-    await waitFor(() => expect(trigger).toHaveFocus());
+    await waitFor(() => expect(menuTrigger).toHaveFocus());
     expect(screen.queryByRole("dialog", { name: "비밀번호 변경" })).not.toBeInTheDocument();
   });
 
@@ -184,6 +189,8 @@ describe("AppShell feature navigation", () => {
       </MemoryRouter>
     );
 
+    const menuTrigger = screen.getByRole("button", { name: "작업공간 메뉴 열기" });
+    await user.click(menuTrigger);
     const trigger = screen.getByRole("button", { name: "설정" });
     await user.click(trigger);
 
@@ -196,6 +203,41 @@ describe("AppShell feature navigation", () => {
     expect(closeButton).toHaveFocus();
 
     await user.keyboard("{Escape}");
-    await waitFor(() => expect(trigger).toHaveFocus());
+    await waitFor(() => expect(menuTrigger).toHaveFocus());
   });
+
+  it("keeps admin and account actions in the drawer while primary destinations stay readable", async () => {
+    const user = userEvent.setup();
+    authState.profile = {
+      ...scheduleOnlyProfile,
+      isAdmin: true,
+      featureAccess: { notes: true, schedule: true, library: true }
+    };
+    render(<MemoryRouter><AppShell><span>내용</span></AppShell></MemoryRouter>);
+
+    const navigation = screen.getByRole("navigation", { name: "주요 메뉴" });
+    expect(within(navigation).getAllByRole("link").map((link) => link.textContent)).toEqual(["메모", "일정", "자료실"]);
+    expect(screen.queryByRole("link", { name: "관리자" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "로그아웃" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "작업공간 메뉴 열기" }));
+    const drawer = screen.getByRole("dialog", { name: "QuickMemo 작업공간 메뉴" });
+    expect(within(drawer).getByRole("link", { name: "관리자" })).toHaveAttribute("href", "/admin");
+    expect(within(drawer).getByRole("button", { name: "로그아웃" })).toBeVisible();
+  });
+
+  it("waits for pending-save approval before signing out from the account drawer", async () => {
+    const user = userEvent.setup();
+    const onBeforeExit = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    render(<MemoryRouter><AppShell onBeforeExit={onBeforeExit}><span>내용</span></AppShell></MemoryRouter>);
+
+    await user.click(screen.getByRole("button", { name: "작업공간 메뉴 열기" }));
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
+    expect(onBeforeExit).toHaveBeenCalledOnce();
+    expect(authState.signOut).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "로그아웃" }));
+    await waitFor(() => expect(authState.signOut).toHaveBeenCalledOnce());
+  });
+
 });

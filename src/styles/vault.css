@@ -39,6 +39,7 @@
 }
 
 .vault-workspace {
+  --vault-rail-size: 64px;
   --vault-hover: var(--vault-row-hover);
   --vault-surface: var(--vault-panel);
   --vault-surface-muted: var(--vault-panel-muted);
@@ -53,22 +54,22 @@
   color: var(--ink);
   display: grid;
   flex: 1;
-  grid-template-columns: 44px minmax(210px, 260px) minmax(0, 1fr) var(--vault-right-panel-size);
+  grid-template-columns: var(--vault-rail-size) minmax(210px, 260px) minmax(0, 1fr) var(--vault-right-panel-size);
   min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
 .vault-workspace.vault-left-closed {
-  grid-template-columns: 44px minmax(0, 1fr) var(--vault-right-panel-size);
+  grid-template-columns: var(--vault-rail-size) minmax(0, 1fr) var(--vault-right-panel-size);
 }
 
 .vault-workspace.vault-right-closed {
-  grid-template-columns: 44px minmax(210px, 260px) minmax(0, 1fr);
+  grid-template-columns: var(--vault-rail-size) minmax(210px, 260px) minmax(0, 1fr);
 }
 
 .vault-workspace.vault-left-closed.vault-right-closed {
-  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-columns: var(--vault-rail-size) minmax(0, 1fr);
 }
 
 .vault-workspace button,
@@ -184,6 +185,160 @@
 .vault-new-tab:hover {
   background: var(--vault-row-hover);
   color: var(--ink);
+}
+
+.vault-ribbon button {
+  border-radius: 10px;
+  flex: 0 0 54px;
+  flex-direction: column;
+  gap: 5px;
+  height: 54px;
+  min-width: 44px;
+  width: 52px;
+}
+
+.vault-ribbon button > span {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.vault-ribbon button[aria-pressed="true"] {
+  background: var(--vault-accent-soft);
+  color: var(--vault-accent);
+}
+
+.vault-more-tools {
+  background: var(--vault-panel);
+  border-top: 1px solid var(--vault-border);
+  flex: 0 0 auto;
+  margin-top: auto;
+  max-height: 55%;
+  overflow-y: auto;
+}
+
+.vault-more-tools > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  min-height: 44px;
+  padding: 0 16px;
+}
+
+.vault-more-tools > summary::-webkit-details-marker {
+  display: none;
+}
+
+.vault-more-tools > summary > span {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.vault-more-tools > summary:focus-visible,
+.vault-archived-file summary:focus-visible {
+  outline: 2px solid var(--vault-accent);
+  outline-offset: -3px;
+}
+
+.vault-more-tools-content {
+  display: grid;
+  gap: 2px;
+  padding: 0 8px 8px;
+}
+
+.vault-more-tools-content button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  color: var(--ink);
+  display: flex;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px;
+  text-align: start;
+}
+
+.vault-more-tools-content button:hover:not(:disabled) {
+  background: var(--vault-row-hover);
+}
+
+.vault-more-tools-content button:disabled,
+.vault-panel-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
+
+.vault-panel-toolbar .vault-create-note {
+  background: var(--vault-accent);
+  border-radius: 8px;
+  color: white;
+  flex: 1;
+  gap: 8px;
+  min-height: 40px;
+  padding-inline: 12px;
+  width: auto;
+}
+
+.vault-panel-toolbar .vault-create-note:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--vault-accent) 88%, black);
+  color: white;
+}
+
+.vault-archived-file {
+  box-sizing: border-box;
+  margin-inline: auto;
+  max-width: 860px;
+  padding: clamp(20px, 5vw, 48px);
+  width: 100%;
+}
+
+.vault-archived-file > svg {
+  color: var(--vault-accent);
+}
+
+.vault-archived-file h2 {
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+
+.vault-archived-file p {
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.vault-archived-file button,
+.vault-archived-file summary {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.vault-archived-file details {
+  margin-top: 20px;
+}
+
+.vault-archived-file summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.vault-archived-file pre {
+  background: var(--vault-panel-muted);
+  border: 1px solid var(--vault-border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .vault-ribbon-spacer {
@@ -1441,30 +1596,7 @@
   opacity: 0.45;
 }
 
-.vault-base-view {
-  display: grid;
-  gap: 12px;
-  min-height: 100%;
-  padding: 14px;
-}
 
-.vault-base-view > details {
-  border: 1px solid var(--vault-border);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.vault-base-view > details > summary {
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 8px 10px;
-}
-
-.vault-base-view > details > div {
-  border-top: 1px solid var(--vault-border);
-  min-height: 240px;
-}
 
 .vault-context-backdrop {
   inset: 0;
@@ -2223,19 +2355,19 @@
 
 @media (max-width: 1180px) {
   .vault-workspace {
-    grid-template-columns: 44px minmax(195px, 230px) minmax(0, 1fr) var(--vault-right-panel-size);
+    grid-template-columns: var(--vault-rail-size) minmax(195px, 230px) minmax(0, 1fr) var(--vault-right-panel-size);
   }
 
   .vault-workspace.vault-left-closed {
-    grid-template-columns: 44px minmax(0, 1fr) var(--vault-right-panel-size);
+    grid-template-columns: var(--vault-rail-size) minmax(0, 1fr) var(--vault-right-panel-size);
   }
 
   .vault-workspace.vault-right-closed {
-    grid-template-columns: 44px minmax(195px, 230px) minmax(0, 1fr);
+    grid-template-columns: var(--vault-rail-size) minmax(195px, 230px) minmax(0, 1fr);
   }
 
   .vault-workspace.vault-left-closed.vault-right-closed {
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: var(--vault-rail-size) minmax(0, 1fr);
   }
 
   .vault-right-panel {
@@ -2285,19 +2417,19 @@
 
 @media (min-width: 761px) and (max-width: 900px) {
   .vault-workspace {
-    grid-template-columns: 44px minmax(150px, 170px) minmax(0, 1fr) var(--vault-right-panel-size);
+    grid-template-columns: var(--vault-rail-size) minmax(150px, 170px) minmax(0, 1fr) var(--vault-right-panel-size);
   }
 
   .vault-workspace.vault-left-closed {
-    grid-template-columns: 44px minmax(0, 1fr) var(--vault-right-panel-size);
+    grid-template-columns: var(--vault-rail-size) minmax(0, 1fr) var(--vault-right-panel-size);
   }
 
   .vault-workspace.vault-right-closed {
-    grid-template-columns: 44px minmax(150px, 170px) minmax(0, 1fr);
+    grid-template-columns: var(--vault-rail-size) minmax(150px, 170px) minmax(0, 1fr);
   }
 
   .vault-workspace.vault-left-closed.vault-right-closed {
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: var(--vault-rail-size) minmax(0, 1fr);
   }
 
   .vault-right-panel > header {
@@ -2397,8 +2529,10 @@
   }
 
   .vault-ribbon button {
-    flex: 0 0 44px;
+    flex: 0 0 54px;
+    height: 54px;
     min-width: 44px;
+    width: 52px;
   }
 
   .vault-new-tab,
@@ -2539,6 +2673,10 @@
 }
 
 @media (max-width: 760px) {
+  .vault-workspace {
+    --vault-rail-size: 56px;
+  }
+
   .vault-workspace-conflict {
     align-items: stretch;
     flex-direction: column;
@@ -2583,7 +2721,7 @@
   .vault-workspace.vault-left-closed,
   .vault-workspace.vault-right-closed,
   .vault-workspace.vault-left-closed.vault-right-closed {
-    grid-template-columns: 44px minmax(0, 1fr);
+    grid-template-columns: var(--vault-rail-size) minmax(0, 1fr);
   }
 
   .vault-right-panel-resizer {
@@ -2620,11 +2758,11 @@
   .vault-left-panel {
     bottom: 0;
     box-shadow: 10px 0 28px rgb(0 0 0 / 18%);
-    left: 44px;
-    max-width: calc(100% - 44px);
+    left: var(--vault-rail-size);
+    max-width: calc(100% - var(--vault-rail-size));
     position: absolute;
     top: 0;
-    width: min(310px, calc(100% - 44px));
+    width: min(310px, calc(100% - var(--vault-rail-size)));
     z-index: 31;
   }
 
@@ -2712,11 +2850,11 @@
   .vault-right-panel {
     bottom: 0;
     box-shadow: -10px 0 28px rgb(0 0 0 / 16%);
-    max-width: calc(100% - 44px);
+    max-width: calc(100% - var(--vault-rail-size));
     position: absolute;
     right: 0;
     top: 0;
-    width: min(330px, calc(100% - 44px));
+    width: min(330px, calc(100% - var(--vault-rail-size)));
     z-index: 30;
   }
 

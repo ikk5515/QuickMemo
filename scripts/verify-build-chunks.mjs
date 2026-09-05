@@ -9,6 +9,12 @@ const assetsDirectory = join(distDirectory, "assets");
 const indexHtml = await readFile(join(distDirectory, "index.html"), "utf8");
 const javascriptFiles = (await readdir(assetsDirectory))
   .filter((fileName) => fileName.endsWith(".js"));
+
+// Retired editors must stay out of the shipped application; compatibility
+// parsers and encrypted import/export do not need their visual runtimes.
+if (javascriptFiles.some((fileName) => /^(?:BaseView|KanbanBoard|VaultJsonCanvasPane)-/u.test(fileName))) {
+  throw new Error("A retired Base, Kanban, or Canvas editor is still included in the build.");
+}
 const commonJsRuntimeFiles = javascriptFiles
   .filter((fileName) => /^commonjs-runtime-[A-Za-z0-9_-]+\.js$/u.test(fileName));
 
@@ -142,8 +148,8 @@ const vaultPageChunk = requireSingleChunk("VaultPage");
 const codeMirrorChunk = requireSingleChunk("CodeMirrorMarkdownEditor");
 
 assertChunkBudget(vaultPageChunk, {
-  rawBytes: 400 * 1_024,
-  gzipBytes: 120 * 1_024
+  rawBytes: 380 * 1_024,
+  gzipBytes: 116 * 1_024
 });
 assertChunkBudget(codeMirrorChunk, {
   rawBytes: 640 * 1_024,

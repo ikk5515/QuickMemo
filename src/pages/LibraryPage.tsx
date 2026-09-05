@@ -326,13 +326,23 @@ function timestampMillis(value: unknown) {
     : 0;
 }
 
-function sameEncryptedLibraryContent(left: LibraryItemSnapshot, right: DecryptedLibraryItem) {
-  return left.generationId === right.generationId
+function sameEncryptedLibraryContent(left: LibraryItemSnapshot, right: DecryptedLibraryItem, uid: string) {
+  const leftKey = left.wrappedKeys?.[uid];
+  const rightKey = right.wrappedKeys?.[uid];
+  return left.id === right.id
+    && left.ownerUid === uid
+    && right.ownerUid === uid
+    && left.generationId === right.generationId
     && left.encryptedContent.version === right.encryptedContent.version
     && left.encryptedContent.algorithm === right.encryptedContent.algorithm
     && left.encryptedContent.cipherText === right.encryptedContent.cipherText
     && left.encryptedContent.iv === right.encryptedContent.iv
-    && left.wrappedKeys[left.ownerUid]?.wrappedKey === right.wrappedKeys[right.ownerUid]?.wrappedKey;
+    && Boolean(leftKey && rightKey)
+    && Object.keys(left.wrappedKeys).length === 1
+    && Object.keys(right.wrappedKeys).length === 1
+    && leftKey?.version === rightKey?.version
+    && leftKey?.algorithm === rightKey?.algorithm
+    && leftKey?.wrappedKey === rightKey?.wrappedKey;
 }
 
 function formatLibraryDate(value: unknown) {
@@ -827,6 +837,7 @@ export default function LibraryPage() {
 
   useEffect(() => {
     libraryDecryptCache.current.clear();
+    libraryItemsRef.current = [];
     noteTitleCache.current.clear();
     attachmentCache.current.clear();
     attachmentRequests.current.clear();
@@ -1044,22 +1055,22 @@ export default function LibraryPage() {
       const cached = libraryDecryptCache.current.get(key);
       const previous = previousById.get(item.id);
 
-      if (cached) {
-        libraryDecryptCache.current.set(key, {
-          ...cached,
-          ...item,
-          content: cached.content,
-          itemKey: cached.itemKey
-        });
-      } else if (previous && sameEncryptedLibraryContent(item, previous)) {
-        libraryDecryptCache.current.set(key, { ...item, content: previous.content, itemKey: previous.itemKey });
+      // Revisions identify mutations, but never prove that cached plaintext
+      // still belongs to the received ciphertext and current owner's key.
+      const reusable = cached && sameEncryptedLibraryContent(item, cached, profile.uid)
+        ? cached
+        : previous && sameEncryptedLibraryContent(item, previous, profile.uid) ? previous : null;
+      if (reusable) {
+        libraryDecryptCache.current.set(key, { ...item, content: reusable.content, itemKey: reusable.itemKey });
+      } else {
+        libraryDecryptCache.current.delete(key);
       }
     });
     const missing = rawLibraryItems.filter((item) => !libraryDecryptCache.current.has(cacheKey(item)));
 
     setLibraryItems(
       rawLibraryItems
-        .map((item) => libraryDecryptCache.current.get(cacheKey(item)) ?? previousById.get(item.id) ?? null)
+        .map((item) => libraryDecryptCache.current.get(cacheKey(item)) ?? null)
         .filter((item): item is DecryptedLibraryItem => Boolean(item))
     );
 
@@ -1070,9 +1081,10 @@ export default function LibraryPage() {
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     setLibraryDecrypting(true);
 
-    void decryptLibraryItems(missing, profile.uid, privateKey)
+    void decryptLibraryItems(missing, profile.uid, privateKey, { signal: controller.signal })
       .then((result) => {
         if (cancelled || libraryDecryptGeneration.current !== generation) {
           return;
@@ -1103,6 +1115,7 @@ export default function LibraryPage() {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [privateKey, profile, rawLibraryItems]);
 

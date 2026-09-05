@@ -903,6 +903,68 @@ describe("LibraryPage", () => {
     expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    ["ciphertext", (item: ReturnType<typeof librarySnapshot>) => ({
+      ...item, encryptedContent: { ...item.encryptedContent, cipherText: "replacement-cipher" }
+    })],
+    ["iv", (item: ReturnType<typeof librarySnapshot>) => ({
+      ...item, encryptedContent: { ...item.encryptedContent, iv: "replacement-iv" }
+    })],
+    ["wrapped key", (item: ReturnType<typeof librarySnapshot>) => ({
+      ...item, wrappedKeys: { "user-a": { ...item.wrappedKeys["user-a"], wrappedKey: "replacement-key" } }
+    })],
+    ["removed key", (item: ReturnType<typeof librarySnapshot>) => ({ ...item, wrappedKeys: {} })],
+    ["unexpected participant", (item: ReturnType<typeof librarySnapshot>) => ({
+      ...item, wrappedKeys: { ...item.wrappedKeys, "user-b": item.wrappedKeys["user-a"] }
+    })],
+    ["owner", (item: ReturnType<typeof librarySnapshot>) => ({ ...item, ownerUid: "user-b" })]
+  ])("drops cached plaintext immediately when %s changes without a revision change", async (_name, change) => {
+    renderPage();
+    expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    let finishDecrypt: ((value: { failedItemIds: string[]; items: unknown[] }) => void) | undefined;
+    serviceMocks.decryptLibraryItems.mockImplementationOnce(() => new Promise((resolve) => {
+      finishDecrypt = resolve;
+    }));
+
+    act(() => testData.librarySubscriber?.([change(librarySnapshot())]));
+
+    await waitFor(() => expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+    await act(async () => {
+      finishDecrypt?.({ failedItemIds: [librarySnapshot().id], items: [] });
+    });
+    expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument();
+  });
+
+  it("does not reuse plaintext across unlocked private-key sessions for the same account", async () => {
+    const { rerender } = renderPage();
+    expect(await screen.findByRole("button", { name: "보안 가이드 열기" })).toBeInTheDocument();
+    serviceMocks.decryptLibraryItems.mockImplementation(async () => ({
+      failedItemIds: [librarySnapshot().id], items: []
+    }));
+    testData.auth.privateKey = {} as CryptoKey;
+
+    rerender(<MemoryRouter><LibraryPage /></MemoryRouter>);
+
+    await waitFor(() => expect(serviceMocks.decryptLibraryItems.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "보안 가이드 열기" })).not.toBeInTheDocument());
+  });
+
+  it("aborts pending list decryption when its subscription is replaced", async () => {
+    serviceMocks.decryptLibraryItems.mockImplementation(() => new Promise(() => {}));
+    const { unmount } = renderPage();
+    await waitFor(() => expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledOnce());
+    const firstSignal = serviceMocks.decryptLibraryItems.mock.calls[0][3].signal as AbortSignal;
+    expect(firstSignal.aborted).toBe(false);
+
+    act(() => testData.librarySubscriber?.([{ ...librarySnapshot(), revision: 2 }]));
+    await waitFor(() => expect(serviceMocks.decryptLibraryItems).toHaveBeenCalledTimes(2));
+    expect(firstSignal.aborted).toBe(true);
+    const secondSignal = serviceMocks.decryptLibraryItems.mock.calls[1][3].signal as AbortSignal;
+    unmount();
+    expect(secondSignal.aborted).toBe(true);
+  });
+
   it("does not let a late decrypt result repopulate items after the subscription fails", async () => {
     let resolveDecrypt: ((value: { failedItemIds: string[]; items: unknown[] }) => void) | undefined;
     serviceMocks.decryptLibraryItems.mockImplementation(() => new Promise((resolve) => {
