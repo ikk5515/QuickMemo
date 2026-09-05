@@ -1,6 +1,7 @@
 /* global document */
 
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import {
   expectCleanRuntime,
   loginDirectly,
@@ -27,16 +28,12 @@ async function expectEditorSource(page, expectedSource) {
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await expect(editor).toBeVisible();
   await expect.poll(async () => (
-    (await editor.locator(".cm-line").allTextContents()).join("\n")
+    await readVaultEditorSource(editor)
   )).toBe(expectedSource);
 }
 
 async function saveActiveEntry(page) {
-  const save = page.getByRole("button", { name: "저장", exact: true });
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
-  await expect(save).toBeDisabled();
+  await saveVaultDocument(page);
 }
 
 async function expectVaultNameWritesReady(page) {
@@ -154,7 +151,7 @@ test("two authenticated contexts preserve a dirty draft and apply a revision-che
     await expectVaultNameWritesReady(page);
     await page.locator('.vault-panel-toolbar button[aria-label="새 노트"]').click();
     await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("E2E Conflict Note");
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(baseSource);
     await saveActiveEntry(page);
     const entryId = await activeEntryId(page);
@@ -164,7 +161,7 @@ test("two authenticated contexts preserve a dirty draft and apply a revision-che
     await expect(pageB.getByRole("textbox", { name: "노트 이름", exact: true }))
       .toHaveValue("E2E Conflict Note");
     await expectVaultNameWritesReady(pageB);
-    await pageB.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     const editorB = pageB.getByRole("textbox", { name: "Markdown 편집기" });
     await expectEditorSource(pageB, baseSource);
 
@@ -187,7 +184,7 @@ test("two authenticated contexts preserve a dirty draft and apply a revision-che
       }
     };
     pageB.on("response", recordConflictResponse);
-    await pageB.getByRole("button", { name: "저장", exact: true }).click();
+    await pageB.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
 
     const conflict = pageB.locator(".vault-save-conflict");
     await expect(conflict).toBeVisible();

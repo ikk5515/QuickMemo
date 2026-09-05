@@ -535,11 +535,11 @@ async function commitVaultFolderMutation(
 async function commitServerVaultNoteMutation<TPayload extends VaultNoteApiPayload>(
   ownerUid: string,
   payload: TPayload,
-  options: { claimId?: string; expectedRevision?: number; signal?: AbortSignal } = {}
+  options: { claimId?: string; expectedRevision?: number; signal?: AbortSignal; beforeDispatch?: () => void } = {}
 ): Promise<VaultNoteMutationResultFor<TPayload>> {
-  const commit = () => options.signal
-    ? mutateVaultNote(ownerUid, payload, options.signal)
-    : mutateVaultNote(ownerUid, payload);
+  const commit = () => options.beforeDispatch
+    ? mutateVaultNote(ownerUid, payload, options.signal, options.beforeDispatch)
+    : options.signal ? mutateVaultNote(ownerUid, payload, options.signal) : mutateVaultNote(ownerUid, payload);
   try {
     return await commit();
   } catch (error) {
@@ -1472,12 +1472,15 @@ export async function getNoteRevisionState(noteId: string) {
 }
 
 async function createRevisionedEncryptedNoteWithFields(
-  input: SaveNoteInput
+  input: SaveNoteInput,
+  beforeDispatch?: () => void
 ): Promise<CreatedRevisionedNoteResult> {
+  beforeDispatch?.();
   assertEncryptedNotePayloadSizes(input);
   if (input.type === "personal" && input.folderId) {
     await ensureVaultFolderTree(input.ownerUid);
   }
+  beforeDispatch?.();
   const versionedVaultEntry = Boolean(input.contentFormat || input.entryKind);
   if (versionedVaultEntry) {
     const validatedClaim = assertVaultNameClaim(
@@ -1487,7 +1490,7 @@ async function createRevisionedEncryptedNoteWithFields(
     const result = await commitServerVaultNoteMutation(
       input.ownerUid,
       vaultNoteCreatePayload(input),
-      { claimId: validatedClaim.claimId }
+      { claimId: validatedClaim.claimId, beforeDispatch }
     );
     return {
       lastMutationId: result.lastMutationId,
@@ -1534,12 +1537,13 @@ async function createRevisionedEncryptedNoteWithFields(
   });
   batch.set(historyRef, historyDocument);
 
+  beforeDispatch?.();
   await batch.commit();
   return { lastMutationId, noteId: noteRef.id, noteRef, revision };
 }
 
-export async function createRevisionedEncryptedNote(input: SaveNoteInput): Promise<CreatedRevisionedNoteResult> {
-  return createRevisionedEncryptedNoteWithFields(input);
+export async function createRevisionedEncryptedNote(input: SaveNoteInput, beforeDispatch?: () => void): Promise<CreatedRevisionedNoteResult> {
+  return createRevisionedEncryptedNoteWithFields(input, beforeDispatch);
 }
 
 function assertExplicitVaultTargetId(targetId: string, label: string) {
@@ -1570,12 +1574,15 @@ function assertVaultImportJobId(jobId: string) {
 export async function createRevisionedEncryptedNoteAtId(
   input: SaveNoteInput,
   targetId: string,
-  importJobId: string
+  importJobId: string,
+  beforeDispatch?: () => void
 ): Promise<CreatedRevisionedNoteResult> {
+  beforeDispatch?.();
   assertEncryptedNotePayloadSizes(input);
   if (input.folderId) {
     await ensureVaultFolderTree(input.ownerUid);
   }
+  beforeDispatch?.();
   const noteId = assertExplicitVaultTargetId(targetId, "가져오기 항목");
   const vaultImportJobId = assertVaultImportJobId(importJobId);
   const validatedClaim = assertVaultNameClaim(
@@ -1588,7 +1595,7 @@ export async function createRevisionedEncryptedNoteAtId(
   const result = await commitServerVaultNoteMutation(
     input.ownerUid,
     vaultNoteImportCreatePayload(input, noteId, vaultImportJobId),
-    { claimId: validatedClaim.claimId }
+    { claimId: validatedClaim.claimId, beforeDispatch }
   );
   return {
     lastMutationId: result.lastMutationId,

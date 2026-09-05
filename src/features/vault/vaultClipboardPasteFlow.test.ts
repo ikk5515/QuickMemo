@@ -308,6 +308,37 @@ describe("Vault clipboard source read deadline", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("forwards cancellation and current destination guards into asset encryption", async () => {
+    mocks.getVisibleNotesByIdsFromServer.mockResolvedValue(successfulServerRead());
+    const state = flowInput([clipboardFile(pngBytes())]);
+    mocks.createEncryptedVaultAsset.mockImplementation(async (_profile, _key, _draft, options) => {
+      expect(options.signal).toBe(state.input.signal);
+      state.assertAssetDestinationCurrent.mockImplementation(() => { throw new DOMException("Scope ended", "AbortError"); });
+      options.assertCurrent();
+      throw new Error("unreachable");
+    });
+    expect(await pasteVaultClipboardImages(state.input)).toBeNull();
+    expect(state.commitSource).not.toHaveBeenCalled();
+    expect(mocks.deleteRevisionedNote).not.toHaveBeenCalled();
+    expect(state.pendingClipboardAssetIds.size).toBe(0);
+  });
+
+  it("keeps a create receipt returned after cancellation available for exact asset rollback", async () => {
+    mocks.getVisibleNotesByIdsFromServer.mockResolvedValue(successfulServerRead());
+    mocks.deleteRevisionedNote.mockResolvedValue(undefined);
+    let finish!: (value: { noteId: string; revision: number }) => void;
+    mocks.createEncryptedVaultAsset.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const state = flowInput([clipboardFile(pngBytes())]);
+    const controller = new AbortController(); state.input.signal = controller.signal;
+    const pending = pasteVaultClipboardImages(state.input);
+    await vi.waitFor(() => expect(mocks.createEncryptedVaultAsset).toHaveBeenCalled());
+    controller.abort(); finish({ noteId: "late-asset", revision: 1 });
+    expect(await pending).toBeNull();
+    expect(mocks.deleteRevisionedNote).toHaveBeenCalledExactlyOnceWith({ expectedRevision: 1, noteId: "late-asset", readerUids: [profile.uid], uid: profile.uid, vaultPasteLockId: `vpl1_${"A".repeat(43)}` });
+    expect(state.commitSource).not.toHaveBeenCalled();
+    expect(state.pendingClipboardAssetIds.size).toBe(0); expect(state.pendingCreatedEntryIds.size).toBe(0);
+  });
+
   it("creates one encrypted asset only after two private source checks succeed", async () => {
     mocks.getVisibleNotesByIdsFromServer.mockResolvedValue(successfulServerRead());
     mocks.createEncryptedVaultAsset.mockResolvedValue({ noteId: "asset-a", revision: 1 });
@@ -323,7 +354,8 @@ describe("Vault clipboard source read deadline", () => {
       expect.objectContaining({
         folderId: "pasted-images-folder",
         vaultPasteLockId: `vpl1_${"A".repeat(43)}`
-      })
+      }),
+      { signal: state.input.signal, assertCurrent: expect.any(Function) }
     );
     expect(mocks.deleteRevisionedNote).not.toHaveBeenCalled();
     expect(result?.source).toBe("![[붙여넣은 이미지/현재 작업중인 노트 이름 -1.png]]");

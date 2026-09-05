@@ -9,6 +9,7 @@ import {
   WidgetType
 } from "@codemirror/view";
 import { isSafeExternalHttpUrl, type MarkdownLinkReference } from "../markdown";
+import { afterCompositionDomSync } from "./afterCompositionDomSync";
 import {
   LivePreviewBlockWidget,
   type LivePreviewBlockRenderOptions
@@ -501,6 +502,14 @@ function buildDecorations(view: EditorView): DecorationSet {
   for (const visible of view.visibleRanges) {
     let line = view.state.doc.lineAt(visible.from);
     while (line.from <= visible.to) {
+      if (!visited.has(line.number) && !complexLines.has(line.number)) {
+        if (isCodeBlockLine(view, line.from, line.to)) {
+          ranges.push(Decoration.line({ class: "cm-live-code-line" }).range(line.from));
+        } else if (activeLines.has(line.number)) {
+          const heading = /^(#{1,6})\s+/u.exec(line.text);
+          if (heading) ranges.push(Decoration.line({ class: `cm-live-heading cm-live-heading-${heading[1].length}` }).range(line.from));
+        }
+      }
       if (!visited.has(line.number) && !activeLines.has(line.number) && !complexLines.has(line.number)) {
         visited.add(line.number);
         decorateInactiveLine(view, line.number, ranges);
@@ -516,6 +525,7 @@ function buildDecorations(view: EditorView): DecorationSet {
 class InlineLivePreviewView {
   decorations: DecorationSet;
   private composing = false;
+  private cancelCompositionFinish: (() => void) | null = null;
 
   constructor(
     private readonly view: EditorView
@@ -544,9 +554,20 @@ class InlineLivePreviewView {
   }
 
   setComposing(composing: boolean): void {
+    this.cancelCompositionFinish?.();
+    this.cancelCompositionFinish = null;
     if (this.composing === composing) return;
     this.composing = composing;
     this.view.dispatch({ effects: refreshLivePreview.of(null) });
+  }
+
+  finishComposition(finish: () => void): void {
+    this.cancelCompositionFinish?.();
+    this.cancelCompositionFinish = afterCompositionDomSync(this.view, finish);
+  }
+
+  destroy(): void {
+    this.cancelCompositionFinish?.();
   }
 }
 
@@ -576,7 +597,7 @@ export function inlineLivePreview(options: LivePreviewBlockRenderOptions = {}): 
       const composition = transaction.effects.find((effect) => effect.is(complexPreviewComposition));
       const composing = composition?.value ?? current.composing;
       if (composing) return { composing, decorations: Decoration.none };
-      if (!transaction.docChanged && !transaction.selection) return current;
+      if (!composition && !transaction.docChanged && !transaction.selection) return current;
       const activeLines = selectedLineNumbersFromState(transaction.state);
       return {
         composing,
@@ -599,8 +620,15 @@ export function inlineLivePreview(options: LivePreviewBlockRenderOptions = {}): 
         return false;
       },
       compositionend: (_event, view) => {
-        view.dispatch({ effects: complexPreviewComposition.of(false) });
-        view.plugin(plugin)?.setComposing(false);
+        const preview = view.plugin(plugin);
+        // Firefox commits the DOM before compositionend but sends input and
+        // flushes CM's DOMObserver afterwards. Synchronous decoration updates
+        // here would redraw the old document and erase that pending input.
+        preview?.finishComposition(() => {
+          if (!preview || view.plugin(plugin) !== preview || view.composing) return;
+          view.dispatch({ effects: complexPreviewComposition.of(false) });
+          preview.setComposing(false);
+        });
         return false;
       }
     }

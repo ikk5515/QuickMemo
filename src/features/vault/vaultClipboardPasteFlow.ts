@@ -486,7 +486,7 @@ export async function pasteVaultClipboardImages({
               mimeType: image.mimeType,
               title,
               vaultPasteLockId: destinationLockId
-            });
+            }, { signal, assertCurrent: () => assertAssetDestinationCurrent(assetDestination!) });
             pendingCreatedEntryIds.add(result.noteId);
             pendingClipboardAssetIds.add(result.noteId);
             pendingAssetTitleKeyById.set(result.noteId, titleKey);

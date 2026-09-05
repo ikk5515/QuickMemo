@@ -67,6 +67,30 @@ function renderTree({
 }
 
 describe("VaultFileTree multi-select UI", () => {
+  it("does not traverse unchanged file rows when the surrounding editor changes", () => {
+    const titleRead = vi.fn(() => "A");
+    const entry = note("a", "A");
+    Object.defineProperty(entry, "title", { get: titleRead });
+    const props = {
+      expandedFolderIds: new Set<string>(), folders: [] as DecryptedVaultFolder[], notes: [entry],
+      mutationDisabled: false, selectedFolderId: null,
+      onBulkMove: vi.fn(async () => undefined), onBulkTrash: vi.fn(async () => undefined),
+      onContextEntry: vi.fn(), onContextFolder: vi.fn(), onDropEntry: vi.fn(async () => undefined),
+      onDropFolder: vi.fn(async () => undefined), onOpenEntry: vi.fn(), onRenameTarget: vi.fn(async () => undefined),
+      onSelectFolder: vi.fn(), onToggleFolder: vi.fn()
+    };
+    const { rerender } = render(<div><output>draft one</output><VaultFileTree {...props} /></div>);
+    const initialReads = titleRead.mock.calls.length;
+    expect(initialReads).toBeGreaterThan(0);
+    rerender(<div><output>draft two</output><VaultFileTree {...props} /></div>);
+    expect(screen.getByText("draft two")).toBeInTheDocument();
+    expect(titleRead).toHaveBeenCalledTimes(initialReads);
+    // Actual inventory changes still refresh the visible rows.
+    rerender(<div><output>draft two</output><VaultFileTree {...props} notes={[...props.notes, note("b", "B")]} /></div>);
+    expect(screen.getByRole("treeitem", { name: "B" })).toBeInTheDocument();
+    expect(titleRead.mock.calls.length).toBeGreaterThan(initialReads);
+  });
+
   it("toggles Cmd/Ctrl selection and clears it on an ordinary click", () => {
     const callbacks = renderTree();
     const first = screen.getByRole("treeitem", { name: "A" });

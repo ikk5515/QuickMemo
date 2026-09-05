@@ -25,12 +25,17 @@ vi.mock("../../api/_secure-share-common.js", async (importOriginal) => {
       if (query.where?.fieldFilter.op === "IN") {
         const allowed = new Set(query.where.fieldFilter.value.arrayValue.values.map((value) => value.referenceValue.split("/documents/")[1]));
         values = values.filter(([path]) => allowed.has(path));
+      } else if (query.where?.fieldFilter.op === "EQUAL") {
+        values = values.filter(([, value]) => value[query.where.fieldFilter.field.fieldPath] === query.where.fieldFilter.value.stringValue);
       } else if (query.where?.fieldFilter.field.fieldPath === "cleanupAt") {
         values = values.filter(([, value]) => value.cleanupAt && new Date(value.cleanupAt).getTime() <= Date.now());
       }
       return values.slice(0, query.limit).map(([, value]) => {
         const projected = { __id: value.__id, __updateTime: value.__updateTime };
-        for (const { fieldPath } of query.select.fields) if (fieldPath in value) projected[fieldPath] = value[fieldPath];
+        for (const { fieldPath } of query.select.fields) {
+          if (fieldPath in value) projected[fieldPath] = value[fieldPath];
+          if (fieldPath === "active.title" && value.active) projected.active = { title: value.active.title };
+        }
         return structuredClone(projected);
       });
     }),
@@ -38,7 +43,7 @@ vi.mock("../../api/_secure-share-common.js", async (importOriginal) => {
       if (writes.length > 500) throw Error("write limit");
       state.writes.push(writes);
       for (const write of writes) {
-        if (write.delete) { state.docs.delete(write.delete.split("/documents/")[1]); continue; }
+        if (write.delete) continue;
         const path = write.update.name.split("/documents/")[1];
         if ((write.currentDocument?.exists === false && state.docs.has(path))
           || (write.currentDocument?.updateTime && write.currentDocument.updateTime !== state.docs.get(path)?.__updateTime)) {
@@ -46,6 +51,10 @@ vi.mock("../../api/_secure-share-common.js", async (importOriginal) => {
             statusCode: write.currentDocument?.exists === false ? 409 : 400,
             upstreamCode: write.currentDocument?.exists === false ? "ALREADY_EXISTS" : "FAILED_PRECONDITION" });
         }
+      }
+      for (const write of writes) {
+        if (write.delete) { state.docs.delete(write.delete.split("/documents/")[1]); continue; }
+        const path = write.update.name.split("/documents/")[1];
         const fields = actual.fromFirestoreFields(write.update.fields);
         expect(Object.keys(fields).some((key) => key.startsWith("__"))).toBe(false);
         state.docs.set(path, { ...fields, __id: path.split("/").pop(), __name: write.update.name, __updateTime: `time-${++state.time}` });
@@ -82,6 +91,10 @@ beforeEach(() => {
   put(`users/${uid}`, { isActive: true, featureAccess: { notes: true } });
   for (const [id, parentId] of [["private-ancestor", null], ["selected", "private-ancestor"], ["child", "selected"], ["outside", null]]) put(`noteFolders/${id}`, { ownerUid: uid, parentId, isDeleted: false, encryptedName: {}, wrappedKey: {} });
   rebuildTree();
+  // Existing schema-1 empty publication fixture: new folder-based creation is now forbidden.
+  const legacyId = `pw1_${"l".repeat(32)}`;
+  put(api.rootPath(uid, "selected"), { ownerUid: uid, rootFolderId: "selected", wikiId: legacyId });
+  put(`publishedWikis/${legacyId}`, { schemaVersion: 1, wikiId: legacyId, ownerUid: uid, rootFolderId: "selected", revision: 0, published: false, active: null, pending: null, updatedAt: null });
   for (const entry of manifest().entries) put(`notes/${entry.sourceNoteId}`, { ownerUid: uid, type: "personal", participantUids: [uid], folderId: entry.sourceFolderId, revision: entry.sourceRevision,
     contentFormat: entry.kind === "asset" ? "asset-v1" : "markdown-v1", entryKind: entry.kind, encryptedBody: { cipherText: "private encrypted original" } });
 });
@@ -132,6 +145,7 @@ describe("published wiki isolated copies and authority", () => {
     ["note purged", () => change("notes/note-b", { isPurged: true })],
     ["note owner changed", () => change("notes/note-b", { ownerUid: "other" })],
     ["owner participant removed", () => change("notes/note-b", { participantUids: ["other"] })],
+    ["malformed participant string", () => change("notes/note-b", { participantUids: "owner" })],
     ["wrong format", () => change("notes/note-b", { contentFormat: "canvas-v1", entryKind: "canvas" })],
     ["child moved outside", () => { change("noteFolders/child", { parentId: "outside" }); rebuildTree(); }]
   ])("removes public entries immediately after %s and denies direct body reads", async (_label, mutate) => {
@@ -291,5 +305,93 @@ describe("published wiki optimistic counter contention", () => {
     await expect(api.consumeLimit(context, "bounded", 3)).rejects.toMatchObject({ statusCode: 503, retryAfter: 1 });
     expect(firestoreCommit.mock.calls.length - start).toBe(4);
     expect([...state.docs.keys()].some((path) => path.startsWith("publicShareRateLimits/"))).toBe(false);
+  });
+});
+
+describe("one owner workspace and globally unique public slugs", () => {
+  const claim = (slug, expectedRevision = 0, owner = uid, extra = {}) => api.ownerAction(context, owner, { action: "set-slug", slug, expectedRevision, ...extra });
+  function workspace() {
+    const legacy = manifest();
+    return { ...legacy, rootFolderId: null, selection: { folderIds: ["selected"], noteIds: [] },
+      entries: legacy.entries.map((entry) => ({ ...entry, parentSourceFolderId: entry.sourceFolderId })) };
+  }
+  it.each(["a", "ab", "a".repeat(41), "admin", "PUBLIC", "schedule", "../ingi", "a/b", "a?b", "a#b", "a%b", "a b", "a\u0000b", "\ud800bad", "ｉｎｇｉ", "한글", "-ingi", "ingi-"])("rejects malformed/reserved slug %s on the server", async (slug) => {
+    await expect(claim(slug)).rejects.toMatchObject({ statusCode: 400 });
+  });
+  it("normalizes spacing/ASCII case, creates an empty owner root and never creates another root for a folder", async () => {
+    const status = await claim("  InGi  "); expect(status).toMatchObject({ slug: "ingi", published: false, revision: 1 });
+    expect(state.docs.get(api.ownerPath(uid)).wikiId).toBe(status.wikiId);
+    const first = await publish(workspace(), 1); expect(first.wikiId).toBe(status.wikiId);
+    const next = workspace(); next.selection.folderIds.push("outside"); next.folders.push({ sourceFolderId: "outside", parentSourceFolderId: null, name: "Linux" });
+    const second = await publish(next, 2); expect(second.wikiId).toBe(status.wikiId);
+    const result = await api.publicAction(context, "manifest", "ingi", [], null);
+    expect(result.slug).toBe("ingi"); expect(result.folders.map((folder) => folder.path)).toContain("Linux");
+    expect([...state.docs.keys()].filter((path) => /^publishedWikiOwners\/[^/]+$/u.test(path))).toHaveLength(1);
+    expect(state.docs.has(api.rootPath(uid, "outside"))).toBe(false);
+  });
+  it("allows only one winner when two users concurrently claim the same slug", async () => {
+    put("users/other", { isActive: true, featureAccess: { notes: true } });
+    const results = await Promise.allSettled([claim("ingi"), claim("ingi", 0, "other")]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find((result) => result.status === "rejected").reason).toMatchObject({ code: "slug_taken", statusCode: 409 });
+    expect([...state.docs.keys()].filter((path) => path.startsWith("publishedWikiOwners/"))).toHaveLength(1);
+  });
+  it("cannot register two independent roots concurrently for one owner", async () => {
+    const results = await Promise.allSettled([claim("ingi"), claim("ingi-tech")]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect([...state.docs.keys()].filter((path) => path.startsWith("publishedWikiOwners/"))).toHaveLength(1);
+    expect([...state.docs.keys()].filter((path) => path.startsWith("publishedWikiSlugs/"))).toHaveLength(1);
+  });
+  it("renames atomically, invalidates old URL and in-flight stages, reserves tombstones against impersonation", async () => {
+    await claim("ingi"); const first = await publish(workspace(), 1); const pending = await stage(workspace(), 2);
+    const renamed = await claim("ingi-tech", 2); expect(renamed).toMatchObject({ wikiId: first.wikiId, revision: 3 });
+    await expect(api.publicAction(context, "manifest", "ingi", [], null)).rejects.toMatchObject({ statusCode: 404 });
+    expect((await api.publicAction(context, "manifest", "ingi-tech", [], null)).wikiId).toBe(first.wikiId);
+    await expect(api.ownerAction(context, uid, { action: "activate", ...pending })).rejects.toMatchObject({ code: "publication_changed" });
+    put("users/other", { isActive: true }); await expect(claim("ingi", 0, "other")).rejects.toMatchObject({ code: "slug_taken" });
+    expect(await api.ownerAction(context, uid, { action: "slug-availability", slug: "ingi" })).toEqual({ slug: "ingi", available: true });
+    expect((await claim("ingi", 3)).wikiId).toBe(first.wikiId);
+  });
+  it("migrates an owned legacy identity without replacing copies or deleting other legacy publications", async () => {
+    const old = await publish(); const before = (await read(old, "content", [api.entryId(old.wikiId, "note-a")], 1)).entries[0].body;
+    const result = await claim("ingi", 1, uid, { legacyWikiId: old.wikiId });
+    expect(result.wikiId).toBe(old.wikiId); expect(result.published).toBe(true);
+    expect((await read(result, "content", [api.entryId(old.wikiId, "note-a")], 2)).entries[0].body).toBe(before);
+    expect((await api.publicAction(context, "manifest", "ingi", [], null)).slug).toBe("ingi");
+    put("users/other", { isActive: true });
+    await expect(claim("stolen", 2, "other", { legacyWikiId: old.wikiId })).rejects.toMatchObject({ statusCode: 404 });
+  });
+  it("exposes only bounded owner metadata and rejects unapproved root-folder creation", async () => {
+    const old = await publish();
+    const status = await api.ownerAction(context, uid, { action: "owner-status" });
+    expect(status.legacyPublications).toEqual([{ wikiId: old.wikiId, rootFolderId: "selected", title: "Published guide", revision: 1, published: true }]);
+    expect(JSON.stringify(status)).not.toContain("encryptedBody"); expect(JSON.stringify(status)).not.toContain("published:note-a");
+    state.docs.delete(api.rootPath(uid, "selected"));
+    await expect(stage()).rejects.toMatchObject({ code: "slug_required" });
+  });
+  it("publishes individually selected root notes without exposing their private parent names and denies private sibling IDs", async () => {
+    await claim("ingi");
+    const original = manifest().entries[0];
+    const input = { ...workspace(), selection: { folderIds: [], noteIds: [original.sourceNoteId] }, folders: [], entries: [{ ...original, parentSourceFolderId: null }] };
+    const status = await publish(input, 1); const result = await api.publicAction(context, "manifest", "ingi", [], null);
+    expect(result.folders).toEqual([]); expect(result.entries[0]).toMatchObject({ folderId: null, path: "Start.md" });
+    expect(JSON.stringify(result)).not.toContain("selected");
+    await expect(read(status, "content", [api.entryId(status.wikiId, "note-b")], 2)).rejects.toMatchObject({ statusCode: 404 });
+    change("notes/note-a", { folderId: "outside" });
+    expect((await api.publicAction(context, "manifest", "ingi", [], null)).entries).toHaveLength(0);
+  });
+  it("keeps unfiled selected notes readable while excluding a deleted selected folder subtree", async () => {
+    await claim("ingi"); put("notes/unfiled", { ownerUid: uid, type: "personal", participantUids: [uid], folderId: null, revision: 1, contentFormat: "markdown-v1" });
+    const input = workspace(); input.selection.noteIds.push("unfiled"); input.entries.push({ sourceNoteId: "unfiled", sourceFolderId: null, parentSourceFolderId: null, sourceRevision: 1, kind: "markdown", title: "Root note" });
+    const status = await publish(input, 1); change("noteFolders/selected", { isDeleted: true }); rebuildTree();
+    expect((await read(status)).entries.map((entry) => entry.title)).toEqual(["Root note"]);
+    change("users/owner", { isActive: false }); await expect(read(status)).rejects.toMatchObject({ statusCode: 404 });
+  });
+  it("rejects forged placements, outside grants, foreign notes and stale source revisions", async () => {
+    await claim("ingi");
+    const input = workspace(); input.entries[0].parentSourceFolderId = null;
+    await expect(stage(input, 1)).rejects.toMatchObject({ code: "publication_scope_denied" });
+    const foreign = workspace(); change("notes/note-a", { ownerUid: "other" });
+    await expect(stage(foreign, 1)).rejects.toMatchObject({ code: "source_changed" });
   });
 });

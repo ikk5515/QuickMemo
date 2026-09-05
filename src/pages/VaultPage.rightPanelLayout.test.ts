@@ -105,6 +105,6 @@ describe("Vault right-panel responsive layout contract", () => {
     expect(ruleBodiesForSelector(mobileStyles, ".vault-right-panel-resizer")).toEqual(
       expect.arrayContaining([expect.stringMatching(/display:\s*none;/u)])
     );
-    expect(source).toContain("{!mobileLayout ? (");
+    expect(source).toContain('{!mobileLayout && surface === "memo" ? (');
   });
 });

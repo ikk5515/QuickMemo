@@ -13,9 +13,8 @@ test("a selected folder publishes its encrypted raster image without granting ac
   await expect(create).toBeEnabled({ timeout: 30_000 });
   await create.click();
   await page.getByLabel("노트 이름").fill("이미지 원본");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill("원본은공개하지않습니다");
-  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const chooserPromise = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "이미지 파일 추가", exact: true }).click();
@@ -30,19 +29,21 @@ test("a selected folder publishes its encrypted raster image without granting ac
   await folder.click();
   await create.click();
   await page.getByLabel("노트 이름").fill("이미지 안내");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill("# 이미지 안내\n\n![[이미지 원본 -1.png]]");
-  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const original = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   await folder.click({ button: "right" });
   await page.getByRole("menuitem", { name: "폴더 위키 공개…", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "폴더 위키 공개", exact: true });
+  const dialog = page.getByRole("dialog", { name: "위키 공개 설정", exact: true });
   await expect(dialog.getByRole("region", { name: "공개할 내용" })).toContainText("메모 1개 · 이미지 1개");
-  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("textbox", { name: "위키 주소" }).fill(`e2e-${fixture.viewerAuth.uid.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(0, 32)}`);
+  await expect(dialog.getByText("사용할 수 있는 주소입니다.")).toBeVisible();
+  await dialog.getByRole("checkbox", { name: /선택한 범위와 이후/ }).check();
   await dialog.getByRole("button", { name: "위키 게시", exact: true }).click();
   const link = dialog.locator('a[target="_blank"]');
   await expect(link).toBeVisible({ timeout: 30_000 });
+  await expect(dialog.getByText(/공개했습니다/)).toBeVisible();
   const anonymous = await browser.newContext({ viewport: { width: 1280, height: 720 }, locale: "ko-KR" });
   try {
     const reader = await anonymous.newPage();
@@ -58,6 +59,7 @@ test("a selected folder publishes its encrypted raster image without granting ac
     expect(await ownedVaultNotesState(request, fixture.viewerAuth.uid)).toEqual(original);
     await dialog.getByRole("button", { name: "공개 중지", exact: true }).click();
     await expect(dialog.getByText(/공개를 중지했습니다/)).toBeVisible();
+    await reader.bringToFront();
     await reader.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect(reader.getByRole("heading", { name: "위키를 열 수 없습니다" })).toBeVisible();
     await expect(picture).toHaveCount(0);

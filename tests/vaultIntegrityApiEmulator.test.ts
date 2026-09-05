@@ -8,6 +8,7 @@ import {
   configureSecureShareApiEmulatorEnvironment,
   createEmulatorOwner,
   readEmulatorDocument,
+  secureShareApiEmulatorProjectId,
   type SecureShareApiHarness,
   writeEmulatorDocuments
 } from "./helpers/secureShareApiEmulator.js";
@@ -164,6 +165,13 @@ describeEmulator("Vault integrity API emulator attestation", () => {
   let idToken = "";
   let uid = "";
 
+  async function requestPreferences(body: Record<string, unknown>, options: { token?: string; resource?: string; marker?: string } = {}) {
+    const response = await fetch(`${harness.origin}/api/vault-integrity${options.resource ?? "?resource=workspace-preferences"}`, {
+      method: "POST", headers: { ...apiHeaders(harness.origin, { authorization: options.token ?? idToken }), [options.marker ?? "x-quickmemo-workspace-preferences"]: "1" }, body: JSON.stringify(body)
+    });
+    return { response, body: await response.json() as Record<string, unknown> };
+  }
+
   async function requestSeal(
     expected: {
       expectedActiveNoteCount: number;
@@ -277,6 +285,43 @@ describeEmulator("Vault integrity API emulator attestation", () => {
 
   afterAll(async () => {
     await harness?.close();
+  });
+
+  it("serves isolated UI preferences through the existing endpoint without touching Vault integrity", async () => {
+    const preferencesPath = `workspaceUiPreferences/${leaseHash(uid)}`;
+    expect((await requestPreferences({ action: "get" })).body).toEqual({ memo: { width: 244, collapsed: false }, wiki: { width: 280, collapsed: false } });
+    const updates = await Promise.all([
+      requestPreferences({ action: "set", kind: "memo", value: { width: 220, collapsed: true } }),
+      requestPreferences({ action: "set", kind: "wiki", value: { width: 360, collapsed: false } })
+    ]);
+    expect(updates.map(({ response }) => response.status)).toEqual([200, 200]);
+    const saved = await requestPreferences({ action: "get" });
+    expect(saved.body).toEqual({ memo: { width: 220, collapsed: true }, wiki: { width: 360, collapsed: false } });
+    expect(saved.response.headers.get("cache-control")).toContain("no-store");
+    expect(await readEmulatorDocument(preferencesPath)).toMatchObject({ ownerUid: uid, memo: { width: 220 }, wiki: { width: 360 } });
+    expect(await readEmulatorDocument(`vaultIntegrity/${uid}`)).toBeNull();
+    const other = await createEmulatorOwner(`preference-other-${Date.now()}@example.test`, "emulator-owner-password");
+    await writeEmulatorDocuments([{ path: `users/${other.localId}`, fields: { uid: other.localId, isActive: true, isAdmin: false, featureAccess: { notes: true } } }]);
+    expect((await requestPreferences({ action: "get" }, { token: other.idToken })).body).toEqual({ memo: { width: 244, collapsed: false }, wiki: { width: 280, collapsed: false } });
+    expect((await requestPreferences({ action: "get", uid }, { token: other.idToken })).response.status).toBe(400);
+    // These collections remain unavailable through the client Firestore API,
+    // even to the owner authenticated with a real emulator ID token.
+    const direct = await fetch(`http://${process.env.FIRESTORE_EMULATOR_HOST}/v1/projects/${secureShareApiEmulatorProjectId}/databases/(default)/documents/${preferencesPath}`, { headers: { authorization: `Bearer ${idToken}` } });
+    expect(direct.status).toBe(403);
+  });
+
+  it("does not mix preference and integrity request contracts or permit inactive callers", async () => {
+    const get = { action: "get" };
+    expect((await requestPreferences(get, { token: "" })).response.status).toBe(401);
+    expect((await requestPreferences(get, { resource: "" })).response.status).toBe(403);
+    expect((await requestPreferences(get, { marker: "x-quickmemo-vault-integrity" })).response.status).toBe(403);
+    expect((await requestPreferences(get, { resource: "?resource=other" })).response.status).toBe(400);
+    expect((await requestPreferences(get, { resource: "?resource=workspace-preferences&resource=workspace-preferences" })).response.status).toBe(400);
+    expect((await requestPreferences({ action: "seal-ready" })).response.status).toBe(400);
+    await writeEmulatorDocuments([{ path: `users/${uid}`, fields: { uid, isActive: false, isAdmin: false, featureAccess: { notes: true } } }]);
+    expect((await requestPreferences(get)).response.status).toBe(403);
+    expect(await readEmulatorDocument(`workspaceUiPreferences/${leaseHash(uid)}`)).toBeNull();
+    expect(await readEmulatorDocument(`vaultIntegrity/${uid}`)).toBeNull();
   });
 
   it("seals an empty pending Vault and keeps the ready attestation idempotent", async () => {

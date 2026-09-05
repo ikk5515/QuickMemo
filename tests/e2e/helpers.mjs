@@ -1,4 +1,4 @@
-/* global HTMLButtonElement, URL, URLSearchParams, document, window */
+/* global HTMLButtonElement, URL, URLSearchParams, document, window, getComputedStyle */
 
 import { expect } from "@playwright/test";
 
@@ -358,8 +358,17 @@ export async function expectNoHorizontalOverflow(page) {
     const root = document.documentElement;
     const body = document.body;
     const overflowingElement = Array.from(document.querySelectorAll("*")).find((element) => {
+      // Retained, inert document panels are intentionally clipped while their
+      // editor/scroll state remains mounted. Measure visible overflow only.
+      if (element.closest("[inert]") || !element.getClientRects().length || getComputedStyle(element).visibility === "hidden") return false;
       const rectangle = element.getBoundingClientRect();
-      return rectangle.right > root.clientWidth + 1 || rectangle.left < -1;
+      let left = rectangle.left, right = rectangle.right;
+      for (let ancestor = element.parentElement; ancestor && ancestor !== body; ancestor = ancestor.parentElement) {
+        if (["hidden", "clip", "auto", "scroll"].includes(getComputedStyle(ancestor).overflowX)) {
+          const clip = ancestor.getBoundingClientRect(); left = Math.max(left, clip.left); right = Math.min(right, clip.right);
+        }
+      }
+      return right > root.clientWidth + 1 || left < -1;
     });
     return {
       body: Math.max(0, body.scrollWidth - body.clientWidth),

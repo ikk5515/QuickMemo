@@ -44,11 +44,11 @@ export function usePublishedWikiData(wikiId: string, preferredIds: readonly stri
       try {
         const readable = manifest.entries.filter((entry) => entry.kind !== "asset");
         const wanted = new Set(preferredRef.current);
-        const ordered = [...readable.filter((entry) => wanted.has(entry.id)), ...readable.filter((entry) => !wanted.has(entry.id))];
+        const ordered = [...readable.filter((entry) => (wanted.has(entry.id) || wanted.has(entry.path))), ...readable.filter((entry) => !(wanted.has(entry.id) || wanted.has(entry.path)))];
         const chunks: string[][] = [];
         for (let index = 0; index < ordered.length; index += PUBLISHED_WIKI_LIMITS.contentPageSize) chunks.push(ordered.slice(index, index + PUBLISHED_WIKI_LIMITS.contentPageSize).map((entry) => entry.id));
         async function read(ids: string[]) {
-          const result = await getPublishedWikiContents(wikiId, ids, manifest.revision, scope.signal);
+          const result = await getPublishedWikiContents(manifest.wikiId, ids, manifest.revision, scope.signal);
           assertScope(scope);
           if (result.revision !== manifest.revision) throw new Error("공개 내용이 변경되었습니다. 다시 열어 주세요.");
           const allowed = new Set(ids);

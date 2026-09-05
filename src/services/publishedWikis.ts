@@ -1,10 +1,10 @@
 import { getToken } from "firebase/app-check";
 import { appCheck, auth } from "../lib/firebase";
 import {
-  PUBLISHED_WIKI_LIMITS as limits,
+  PUBLISHED_WIKI_LIMITS as limits, normalizeWikiSlug, isValidWikiSlug,
   type PreparedWikiPublication, type PublishedWikiContent, type PublishedWikiContentPage,
   type PublishedWikiEntry, type PublishedWikiFolder, type PublishedWikiManifest,
-  type PublishedWikiOwnerStatus, type WikiPublicationContentInput, type WikiPublicationStage
+  type PublishedWikiOwnerStatus, type WikiPublicationInput, type WikiPublicationSelection, type WikiPublicationContentInput, type WikiPublicationStage
 } from "../features/wiki/publishedWikiTypes";
 
 const apiPath = "/api/published-wikis";
@@ -15,6 +15,12 @@ const folderPattern = /^f_[0-9a-f]{32}$/u;
 interface Options { signal?: AbortSignal; expectedUid?: string }
 interface PublishOptions extends Options { onProgress?: (completed: number, total: number) => void }
 const errorMessages: Record<string, string> = {
+  invalid_slug: "위키 주소는 3~40자의 영문, 숫자, 하이픈으로 입력해 주세요.",
+  reserved_slug: "이 주소는 사용할 수 없습니다.",
+  slug_taken: "이미 사용 중인 위키 주소입니다.",
+  slug_required: "먼저 사용할 위키 주소를 정해 주세요.",
+  workspace_exists: "이미 연결된 위키가 있습니다. 기존 내용을 선택해 추가해 주세요.",
+  service_unavailable: "위키에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요.",
   not_found: "공개가 중지되었거나 사용할 수 없는 위키입니다.",
   source_changed: "메모가 변경되었습니다. 내용을 다시 확인해 주세요.",
   publication_changed: "공개 내용이 변경되었습니다. 새로 확인한 뒤 다시 시도해 주세요.",
@@ -47,16 +53,44 @@ function nullableString(value: unknown) { return value === null ? null : string(
 function matched(value: unknown, pattern: RegExp) {
   const result = string(value); if (!pattern.test(result)) throw new PublishedWikiError("invalid_response", 502); return result;
 }
+function parseSelection(value: unknown): WikiPublicationSelection {
+  const row = record(value);
+  const ids = (value: unknown, maximum: number) => list(value, maximum, (id) => matched(id, /^[A-Za-z0-9_-]{1,128}$/u));
+  const folderIds = ids(row.folderIds, limits.folders); const noteIds = ids(row.noteIds, limits.notes + limits.assets);
+  if (new Set(folderIds).size !== folderIds.length || new Set(noteIds).size !== noteIds.length) throw new PublishedWikiError("invalid_response", 502);
+  return { folderIds, noteIds };
+}
+function parseOwnerManifest(value: unknown): WikiPublicationInput | null {
+  if (value === null || value === undefined) return null;
+  const row = record(value); const sourceId = (id: unknown) => matched(id, /^[A-Za-z0-9_-]{1,128}$/u);
+  return { rootFolderId: row.rootFolderId === null ? null : sourceId(row.rootFolderId),
+    ...(row.selection === undefined ? {} : { selection: parseSelection(row.selection) }), title: string(row.title), expiresAt: nullableString(row.expiresAt),
+    folders: list(row.folders, limits.folders, (value) => { const folder = record(value); return { sourceFolderId: sourceId(folder.sourceFolderId), parentSourceFolderId: folder.parentSourceFolderId === null ? null : sourceId(folder.parentSourceFolderId), name: string(folder.name) }; }),
+    entries: list(row.entries, limits.notes + limits.assets, (value) => { const entry = record(value);
+      if (!["markdown", "legacy-html", "asset"].includes(String(entry.kind))) throw new PublishedWikiError("invalid_response", 502);
+      return { sourceNoteId: sourceId(entry.sourceNoteId), sourceFolderId: entry.sourceFolderId === null ? null : sourceId(entry.sourceFolderId), sourceRevision: numeric(entry.sourceRevision),
+        ...(entry.parentSourceFolderId === undefined ? {} : { parentSourceFolderId: entry.parentSourceFolderId === null ? null : sourceId(entry.parentSourceFolderId) }), title: string(entry.title), kind: entry.kind as "markdown" | "legacy-html" | "asset" }; }) };
+}
+function parsedSlug(value: unknown) {
+  if (value === undefined || value === null) return null;
+  const slug = string(value, 40); if (!isValidWikiSlug(slug)) throw new PublishedWikiError("invalid_response", 502); return slug;
+}
 function parseStatus(value: unknown): PublishedWikiOwnerStatus {
   const row = record(value);
   if (typeof row.published !== "boolean") throw new PublishedWikiError("invalid_response", 502);
-  return { wikiId: row.wikiId === null ? null : matched(row.wikiId, wikiPattern), revision: numeric(row.revision), published: row.published,
+  return { wikiId: row.wikiId === null ? null : matched(row.wikiId, wikiPattern), slug: parsedSlug(row.slug),
+    selection: row.selection === undefined ? { folderIds: [], noteIds: [] } : parseSelection(row.selection), manifest: parseOwnerManifest(row.manifest),
+    legacyHasMore: row.legacyHasMore === true,
+    legacyPublications: row.legacyPublications === undefined ? [] : list(row.legacyPublications, 20, (value) => {
+      const site = record(value); if (typeof site.published !== "boolean") throw new PublishedWikiError("invalid_response", 502);
+      return { wikiId: matched(site.wikiId, wikiPattern), rootFolderId: string(site.rootFolderId, 128), title: string(site.title), published: site.published, revision: numeric(site.revision) };
+    }), revision: numeric(row.revision), published: row.published,
     title: string(row.title), expiresAt: nullableString(row.expiresAt), updatedAt: nullableString(row.updatedAt), noteCount: numeric(row.noteCount), assetCount: numeric(row.assetCount) };
 }
 function parseEntry(value: unknown): PublishedWikiEntry {
   const row = record(value);
   if (!["markdown", "legacy-html", "asset"].includes(String(row.kind))) throw new PublishedWikiError("invalid_response", 502);
-  return { id: matched(row.id, entryPattern), folderId: matched(row.folderId, folderPattern), title: string(row.title), path: string(row.path, 32 * 512), kind: row.kind as PublishedWikiEntry["kind"] };
+  return { id: matched(row.id, entryPattern), folderId: row.folderId === null ? null : matched(row.folderId, folderPattern), title: string(row.title), path: string(row.path, 32 * 512), kind: row.kind as PublishedWikiEntry["kind"] };
 }
 function list<T>(value: unknown, maximum: number, parse: (entry: unknown) => T): T[] {
   if (!Array.isArray(value) || value.length > maximum) throw new PublishedWikiError("invalid_response", 502);
@@ -70,8 +104,8 @@ function parseManifest(value: unknown): PublishedWikiManifest {
   const entries = list(row.entries, limits.notes + limits.assets, parseEntry);
   const folderIds = new Set(folders.map((folder) => folder.id));
   if (folderIds.size !== folders.length || new Set(entries.map((entry) => entry.id)).size !== entries.length
-    || entries.some((entry) => !folderIds.has(entry.folderId)) || folders.some((folder) => folder.parentId !== null && !folderIds.has(folder.parentId))) throw new PublishedWikiError("invalid_response", 502);
-  return { wikiId: matched(row.wikiId, wikiPattern), revision: numeric(row.revision), title: string(row.title), expiresAt: nullableString(row.expiresAt), updatedAt: string(row.updatedAt), folders, entries };
+    || entries.some((entry) => entry.folderId !== null && !folderIds.has(entry.folderId)) || folders.some((folder) => folder.parentId !== null && !folderIds.has(folder.parentId))) throw new PublishedWikiError("invalid_response", 502);
+  return { wikiId: matched(row.wikiId, wikiPattern), slug: parsedSlug(row.slug), revision: numeric(row.revision), title: string(row.title), expiresAt: nullableString(row.expiresAt), updatedAt: string(row.updatedAt), folders, entries };
 }
 function parseContentPage(value: unknown, ids: string[], revision: number, asset: boolean): PublishedWikiContentPage {
   const row = record(value);
@@ -109,11 +143,28 @@ async function request(bodyOrQuery: Record<string, unknown>, options: Options, o
   if (!response.ok) throw new PublishedWikiError(typeof record(data).error === "string" ? String(record(data).error) : "request_failed", response.status);
   return data;
 }
-export async function getPublishedWikiOwnerStatus(rootFolderId: string, options: Options = {}) {
+export async function getPublishedWikiOwnerStatus(rootFolderId: string | null, options: Options = {}) {
   return parseStatus(await request({ action: "status", rootFolderId }, options, true));
 }
-export async function unpublishWiki(rootFolderId: string, expectedRevision: number, options: Options = {}) {
+export async function unpublishWiki(rootFolderId: string | null, expectedRevision: number, options: Options = {}) {
   return parseStatus(await request({ action: "unpublish", rootFolderId, expectedRevision }, options, true));
+}
+export async function getPublishedWikiWorkspaceStatus(options: Options = {}) {
+  return parseStatus(await request({ action: "owner-status" }, options, true));
+}
+export async function checkPublishedWikiSlugAvailability(input: string, options: Options = {}) {
+  const slug = normalizeWikiSlug(input);
+  if (!isValidWikiSlug(slug)) throw new PublishedWikiError("invalid_slug", 400);
+  const row = record(await request({ action: "slug-availability", slug }, options, true));
+  if (parsedSlug(row.slug) !== slug || typeof row.available !== "boolean") throw new PublishedWikiError("invalid_response", 502);
+  return { slug, available: row.available };
+}
+export async function setPublishedWikiSlug(input: string, expectedRevision: number, options: Options & { legacyWikiId?: string } = {}) {
+  const slug = normalizeWikiSlug(input);
+  if (!isValidWikiSlug(slug)) throw new PublishedWikiError("invalid_slug", 400);
+  const result = parseStatus(await request({ action: "set-slug", slug, expectedRevision,
+    ...(options.legacyWikiId ? { legacyWikiId: options.legacyWikiId } : {}) }, options, true));
+  if (result.slug !== slug) throw new PublishedWikiError("invalid_response", 502); return result;
 }
 function contentChunks(contents: WikiPublicationContentInput[]) {
   const chunks: WikiPublicationContentInput[][] = []; let chunk: WikiPublicationContentInput[] = [];
@@ -146,8 +197,11 @@ export async function publishPreparedWiki(prepared: PreparedWikiPublication, exp
   }
 }
 export async function getPublishedWikiManifest(wikiId: string, signal?: AbortSignal) {
-  const result = parseManifest(await request({ action: "manifest", wikiId }, { signal }, false));
-  if (result.wikiId !== wikiId) throw new PublishedWikiError("invalid_response", 502); return result;
+  const legacy = wikiPattern.test(wikiId);
+  const slug = legacy ? null : normalizeWikiSlug(wikiId);
+  if (!legacy && !isValidWikiSlug(slug!)) throw new PublishedWikiError("invalid_request", 400);
+  const result = parseManifest(await request({ action: "manifest", ...(legacy ? { wikiId } : { slug }) }, { signal }, false));
+  if (legacy ? result.wikiId !== wikiId : result.slug !== slug) throw new PublishedWikiError("invalid_response", 502); return result;
 }
 async function getContents(wikiId: string, ids: string[], revision: number, signal: AbortSignal | undefined, asset: boolean) {
   if (!wikiPattern.test(wikiId) || !ids.length || ids.length > (asset ? 1 : limits.contentPageSize) || new Set(ids).size !== ids.length

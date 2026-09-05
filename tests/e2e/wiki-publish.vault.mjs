@@ -1,5 +1,6 @@
 /* global document, window, Event */
 import { expect, test } from "@playwright/test";
+import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 import { allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow, loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario } from "./helpers.mjs";
 async function explorer(page) {
   const panel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
@@ -11,10 +12,9 @@ async function createNote(page, title, body) {
   const create = panel.getByRole("button", { name: "새 노트", exact: true });
   await expect(create).toBeEnabled({ timeout: 30_000 }); await create.click();
   await expect(page.getByLabel("노트 이름")).toBeEnabled();
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
   await page.getByLabel("노트 이름").fill(title);
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(body);
-  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
 }
 async function publishDialog(page) {
@@ -22,14 +22,15 @@ async function publishDialog(page) {
   const folder = panel.getByRole("treeitem", { name: "공개 지식", exact: true });
   await folder.click({ button: "right" });
   await page.getByRole("menuitem", { name: "폴더 위키 공개…", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "폴더 위키 공개", exact: true });
-  await expect(dialog.getByRole("checkbox")).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "위키 공개 설정", exact: true });
+  await expect(dialog.getByRole("checkbox", { name: /선택한 범위와 이후/ })).toBeVisible();
   return dialog;
 }
 async function wikiSearch(page) {
   await expect(page.getByRole("main", { name: "위키 읽기 패널" })).toBeVisible();
   const search = page.getByRole("searchbox", { name: "위키 검색" });
-  if (!(await search.isVisible())) await page.getByRole("button", { name: "위키 목록 열기" }).click();
+  const toggle = page.getByRole("button", { name: /^위키 목록 (열기|닫기)$/ });
+  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
   await expect(search).toBeVisible();
   return search;
 }
@@ -56,7 +57,7 @@ test("publishes only the selected encrypted folder with stacked public pages and
     return {
       fitsViewport: bounds.left >= 0 && bounds.right <= document.documentElement.clientWidth,
       hasHorizontalScroll: element.scrollWidth > element.clientWidth + 1,
-      clippedControls: [...element.querySelectorAll("button, input, a")].some((control) => {
+      clippedControls: [...element.querySelectorAll("button, input, a")].filter((control) => control.getClientRects().length).some((control) => {
         const box = control.getBoundingClientRect();
         return box.left < bounds.left - 1 || box.right > bounds.right + 1;
       })
@@ -68,12 +69,16 @@ test("publishes only the selected encrypted folder with stacked public pages and
   });
   await page.screenshot({ path: testInfo.outputPath("folder-publication.png"), fullPage: true });
   await expect(dialog.getByRole("button", { name: "위키 게시", exact: true })).toBeDisabled();
-  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("textbox", { name: "위키 주소" }).fill(`e2e-${fixture.viewerAuth.uid.replace(/[^a-z0-9]/gi, "").toLowerCase().slice(0, 32)}`);
+  await expect(dialog.getByText("사용할 수 있는 주소입니다.")).toBeVisible();
+  await dialog.getByRole("checkbox", { name: /선택한 범위와 이후/ }).check();
   await dialog.getByRole("button", { name: "위키 게시", exact: true }).click();
   const publicLink = dialog.locator('a[target="_blank"]');
   await expect(publicLink).toBeVisible({ timeout: 30_000 });
   const publicUrl = await publicLink.getAttribute("href");
-  expect(publicUrl).toContain("/wiki/public/pw1_");
+  expect(publicUrl).toMatch(/\/wiki\/e2e-[a-z0-9]+$/);
+  expect(publicUrl).not.toContain("pw1_");
+  await expect(dialog.getByText(/공개했습니다/)).toBeVisible();
   const anonymous = await browser.newContext({ viewport: testInfo.project.use.viewport, locale: "ko-KR", baseURL: "http://127.0.0.1:4174" });
   try {
     const reader = await anonymous.newPage();
@@ -105,15 +110,14 @@ test("publishes only the selected encrypted folder with stacked public pages and
     for (const theme of ["light", "dark"]) {
       await reader.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
       await expectNoHorizontalOverflow(reader);
-      await reader.locator(".wiki-panel-stack").evaluate(async (element) => {
-        await Promise.all(element.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined)));
-      });
+      await expectVisibleWikiMotionFinished(reader);
       await reader.screenshot({ path: testInfo.outputPath(`public-wiki-${theme}.png`), fullPage: true });
     }
     await expect(reader.getByRole("textbox", { name: "Markdown 편집기" })).toHaveCount(0);
     expect(await ownedVaultNotesState(request, fixture.viewerAuth.uid)).toEqual(originalNotes);
     await dialog.getByRole("button", { name: "공개 중지", exact: true }).click();
     await expect(dialog.getByText(/공개를 중지했습니다/)).toBeVisible();
+    await reader.bringToFront();
     await reader.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect(reader.getByRole("heading", { name: "위키를 열 수 없습니다" })).toBeVisible();
     await expect(reader.locator(".wiki-body")).toHaveCount(0);

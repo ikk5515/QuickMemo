@@ -1,0 +1,6 @@
+.qm-sidebar-resizer { position: absolute; z-index: 25; inset-block: 0; inset-inline-end: -4px; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+.qm-sidebar-resizer::after { content: ""; position: absolute; inset-block: 0; left: 3px; width: 2px; background: transparent; transition: background-color 120ms ease; }
+.qm-sidebar-resizer:hover::after, .qm-sidebar-resizer:focus-visible::after, .qm-sidebar-resizer[data-resizing="true"]::after { background: var(--color-primary); }
+.qm-sidebar-resizer:focus-visible { box-shadow: 0 0 0 2px var(--color-focus-ring); }
+@media (pointer: coarse) { .qm-sidebar-resizer { inset-inline-end: -8px; width: 16px; } .qm-sidebar-resizer::after { left: 7px; } }
+@media (prefers-reduced-motion: reduce) { .qm-sidebar-resizer::after { transition: none; } }

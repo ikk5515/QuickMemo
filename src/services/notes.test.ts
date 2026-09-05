@@ -338,6 +338,26 @@ describe("revision-aware note persistence", () => {
     );
   });
 
+  it("blocks create after folder readiness resolves into a cancelled operation", async () => {
+    let finish!: (value: { status: string }) => void;
+    mocks.ensureVaultFolderTree.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    const controller = new AbortController();
+    const pending = createRevisionedEncryptedNote({ contentFormat: "asset-v1", entryKind: "asset", encryptedBody: encryptedPayload, encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload, historySummary: encryptedPayload, nameClaim: vaultNameClaim("folder-a"), folderId: "folder-a", ownerUid: "user-a", participantUids: ["user-a"], type: "personal", wrappedKeys: { "user-a": wrappedKey }
+    }, () => controller.signal.throwIfAborted());
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort(); finish({ status: "ready" }); await rejected;
+    expect(mocks.mutateVaultNote).not.toHaveBeenCalled(); expect(mocks.batch.commit).not.toHaveBeenCalled();
+  });
+
+  it("preserves the pre-dispatch guard through the create service boundary", async () => {
+    const guard = vi.fn();
+    await createRevisionedEncryptedNote({ contentFormat: "asset-v1", entryKind: "asset", encryptedBody: encryptedPayload, encryptedTitle: encryptedPayload,
+      historySnapshot: encryptedPayload, historySummary: encryptedPayload, nameClaim: vaultNameClaim(null), ownerUid: "user-a", participantUids: ["user-a"], type: "personal", wrappedKeys: { "user-a": wrappedKey }
+    }, guard);
+    expect(mocks.mutateVaultNote).toHaveBeenCalledWith("user-a", expect.objectContaining({ action: "create" }), undefined, guard);
+  });
+
   it("creates a versioned Vault note through the server-authoritative contract", async () => {
     const result = await createRevisionedEncryptedNote({
       contentFormat: "markdown-v1",

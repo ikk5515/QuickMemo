@@ -5,7 +5,6 @@ import type { GraphUiData } from "../graph/types";
 
 export const WIKI_LIST_PAGE_SIZE = 120;
 export const WIKI_GRAPH_NODE_LIMIT = 120;
-export const WIKI_PANEL_LIMIT = 6;
 
 export type WikiReadableNote = Pick<DecryptedVaultNote, "id" | "title" | "body" | "entryKind" | "contentFormat" | "folderId">;
 export type WikiReadableFolder = Pick<DecryptedVaultFolder, "id" | "parentId" | "displayName">;
@@ -42,25 +41,28 @@ export function wikiEntries(notes: readonly WikiReadableNote[], folders: readonl
   })).sort((left, right) => left.path.localeCompare(right.path, "ko"));
 }
 
-export function wikiPanelIds(rootId: string | undefined, linkedIds: readonly string[], allowedIds: ReadonlySet<string>) {
-  if (!rootId || !allowedIds.has(rootId)) return [];
-  const result = [rootId];
-  for (const id of linkedIds.slice(0, WIKI_PANEL_LIMIT - 1)) {
-    if (!allowedIds.has(id) || result.includes(id)) break;
-    result.push(id);
+/** Per-reader identity cache: typing in A must not invalidate B's editor props. */
+export class WikiEntriesProjection {
+  private cached = new Map<string, { body: string; format: WikiReadableNote["contentFormat"]; entry: VaultIndexEntry }>();
+  private previous: VaultIndexEntry[] = [];
+  project(notes: readonly WikiReadableNote[], folders: readonly WikiReadableFolder[]) {
+    const paths = wikiFolderPaths(folders);
+    const next = new Map<string, { body: string; format: WikiReadableNote["contentFormat"]; entry: VaultIndexEntry }>();
+    const entries = notes.map((note) => {
+      const path = vaultEntryPath(note, paths);
+      const cached = this.cached.get(note.id);
+      const value = cached && cached.body === note.body && cached.format === note.contentFormat && cached.entry.path === path && cached.entry.kind === note.entryKind
+        ? cached : { body: note.body, format: note.contentFormat, entry: { id: note.id, path, kind: note.entryKind,
+          content: note.contentFormat === "legacy-html-v1" ? previewTextFromHtml(note.body) : note.body } };
+      next.set(note.id, value); return value.entry;
+    }).sort((a, b) => a.path.localeCompare(b.path, "ko"));
+    this.cached = next;
+    if (entries.length !== this.previous.length || entries.some((entry, index) => entry !== this.previous[index])) this.previous = entries;
+    return this.previous;
   }
-  return result;
+  clear() { this.cached.clear(); this.previous = []; }
 }
 
-/** Following a link from an earlier panel replaces only panels to its right. */
-export function appendWikiPanel(ids: readonly string[], sourceId: string, targetId: string) {
-  const sourceIndex = ids.indexOf(sourceId);
-  if (sourceIndex < 0) return [...ids];
-  const prefix = ids.slice(0, sourceIndex + 1);
-  const existingIndex = prefix.indexOf(targetId);
-  if (existingIndex >= 0) return prefix.slice(0, existingIndex + 1);
-  return [...prefix.slice(0, WIKI_PANEL_LIMIT - 1), targetId];
-}
 
 export interface WikiOutlineNode { heading: MarkdownHeading; children: WikiOutlineNode[] }
 export function wikiOutline(headings: readonly MarkdownHeading[]): WikiOutlineNode[] {
@@ -81,9 +83,16 @@ export type WikiTreeRow =
   | { kind: "note"; id: string; title: string; depth: number; path: string };
 
 /** Iterative flattening keeps deep or large trees bounded without recursive JSX. */
-export function wikiTreeRows(entries: readonly VaultIndexEntry[], collapsed: ReadonlySet<string>): WikiTreeRow[] {
+export function wikiTreeRows(entries: readonly VaultIndexEntry[], collapsed: ReadonlySet<string>, readableFolders: readonly WikiReadableFolder[] = []): WikiTreeRow[] {
   const folders = new Map<string, { title: string; parent: string; count: number }>();
   const children = new Map<string, WikiTreeRow[]>();
+  for (const path of wikiFolderPaths(readableFolders).values()) {
+    const segments = path.split("/");
+    for (let index = 0; index < segments.length; index += 1) {
+      const id = segments.slice(0, index + 1).join("/");
+      folders.set(id, { title: segments[index], parent: segments.slice(0, index).join("/"), count: 0 });
+    }
+  }
   for (const entry of entries) {
     const segments = entry.path.split("/");
     let parent = "";

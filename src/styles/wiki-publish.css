@@ -27,3 +27,15 @@
 @keyframes wiki-publish-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 520px) { .wiki-publish-backdrop { padding: 10px; } .wiki-publish-dialog { max-height: calc(100dvh - 20px); } .wiki-publish-dialog header, .wiki-publish-dialog footer { padding: 12px; gap: 6px; } .wiki-publish-content { padding: 4px 12px 14px; } .wiki-publish-dialog button { min-height: 44px; font-size: 12px; } .wiki-publish-dialog footer > div { gap: 4px; } }
 @media (prefers-reduced-motion: reduce) { .wiki-publish-dialog { animation: none; } }
+.wiki-publish-dialog { border-radius: 8px; }
+.wiki-publish-field { display: grid; gap: 6px; margin: 14px 0; font-size: 13px; }
+.wiki-publish-field small { color: var(--color-text-muted); font-size: 12px; }
+.wiki-publish-field input, .wiki-publish-field select { min-width: 0; width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid var(--color-border); border-radius: 4px; color: var(--color-text-primary); background: var(--color-surface); }
+.wiki-publish-slug { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wiki-publish-slug > span, .wiki-publish-slug > button { flex-shrink: 0; }
+.wiki-publish-selection { padding: 10px; margin: 16px 0; border: 1px solid var(--color-border); border-radius: 4px; font-size: 13px; min-width: 0; }
+.wiki-publish-selection summary { padding: 6px 0; cursor: pointer; }
+.wiki-publish-selection details > div { max-height: 160px; overflow: auto; }
+.wiki-publish-selection label { display: flex; gap: 8px; padding: 5px 4px; align-items: flex-start; min-width: 0; cursor: pointer; }
+.wiki-publish-selection input { flex: 0 0 16px; width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 1px 0 0; accent-color: var(--color-primary); }
+.wiki-publish-selection label > span { overflow-wrap: anywhere; min-width: 0; }

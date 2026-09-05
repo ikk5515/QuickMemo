@@ -99,11 +99,23 @@ describe("VaultPage security boundaries", () => {
     expect(folderCallback).not.toContain("setDecryptedNotes(");
   });
 
+  it("keeps unfinished IME input inside the authorized session across exit and close actions", () => {
+    const flush = vaultPageSource.slice(vaultPageSource.indexOf("async function flushDirtyEntries("), vaultPageSource.indexOf("async function flushWorkspaceBeforeExit("));
+    expect(flush.indexOf("if (composingEntryIdsRef.current.size)")).toBeLessThan(flush.indexOf("const dirtyEntryIds"));
+    expect(flush).toMatch(/if \(composingEntryIdsRef\.current\.size\) \{[\s\S]*?return false;/u);
+    expect(vaultPageSource).toContain("const hasDirtyDrafts = composingEntryIdsRef.current.size > 0 ||");
+    expect(vaultPageSource).toContain("composingEntryIdsRef.current.has(closingTab.entryId)");
+    expect(vaultPageSource).toContain('beforeCloseDocument={async (id) => {\n                if (composingEntryIdsRef.current.has(id))');
+    expect(vaultPageSource).toContain("|| composingEntryIdsRef.current.size > 0");
+  });
+
   it("invalidates path-rewrite continuations at every Vault access-scope boundary", () => {
     const scopeClear = vaultPageSource.match(
-      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[decryptionSession, resetPastedImageFolderRuntime\]\);/u
+      /const clearVaultPlaintextForAccessScope = useCallback\(\(\) => \{[\s\S]*?\n\s{2}\}, \[decryptionSession, editorSessionStore, resetPastedImageFolderRuntime\]\);/u
     )?.[0] ?? "";
     expect(scopeClear).toContain("pathRewriteRecoveryGenerationRef.current += 1;");
+    expect(scopeClear).toContain("editorSessionStore.clear()");
+    expect(scopeClear).toContain("composingEntryIdsRef.current.clear()");
     expect(scopeClear).toContain("pathRewriteCleanupSessionRef.current = null;");
     expect(scopeClear).toContain("pathRewriteCleanupOwnerRef.current = null;");
     expect(scopeClear).toContain("pathRewriteRecoveryFailureCountRef.current = 0;");
@@ -202,7 +214,7 @@ describe("VaultPage security boundaries", () => {
     expect(vaultPageSource).toContain("const entryCreationContentLocked = pendingEntryCreation !== null;");
     expect(titleInput).toContain("|| entryCreationContentLocked");
     expect(inactivePane).toContain("|| entryCreationContentLocked");
-    expect(vaultPageSource).toContain("readOnly={viewMode === \"reading\" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}");
+    expect(vaultPageSource).toContain("readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked || conflictedEntryIds.has(activeNote.id)}");
     expect(vaultPageSource).not.toContain("onEditProperty=");
     expect(vaultPageSource).not.toMatch(/const entryCreationContentLocked[^;]*savingEntryIds/u);
   });
@@ -364,7 +376,9 @@ describe("VaultPage security boundaries", () => {
     expect(vaultClipboardPasteFlowSource).not.toContain("data:");
     expect(vaultClipboardPasteFlowSource).not.toContain("localStorage");
     expect(vaultClipboardPasteFlowSource).not.toContain("sessionStorage");
-    expect(vaultPageSource.match(/onPasteImages=\{pasteImagesIntoActiveMarkdown\}/gu)).toHaveLength(2);
+    expect(vaultPageSource.match(/onPasteImages=\{pasteImagesIntoActiveMarkdown\}/gu)).toHaveLength(1);
+    expect(vaultPageSource).toContain("onPasteImages={(files, pasteContext) => stablePasteImagesIntoMarkdownEntry(note.id, files, pasteContext)}");
+    expect(vaultPageSource).toContain("useStableEvent(pasteImagesIntoMarkdownEntry)");
     expect(codeMirrorMarkdownEditorSource).toContain("accept={VAULT_MARKDOWN_IMAGE_ACCEPT}");
     expect(codeMirrorMarkdownEditorSource).toContain("vaultSelectedImageFiles(event.currentTarget.files)");
     expect(codeMirrorMarkdownEditorSource).toContain("vaultClipboardImageFiles(event.dataTransfer)");

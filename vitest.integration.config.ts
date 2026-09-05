@@ -7,6 +7,7 @@ export default defineConfig({
     hookTimeout: 30_000,
     include: [
       "tests/secureShareApiEmulator.test.ts",
+      "tests/publishedWikiApiEmulator.test.ts",
       "tests/vaultFolderApiEmulator.test.ts",
       "tests/vaultIntegrityApiEmulator.test.ts",
       "tests/vaultNoteApiEmulator.test.ts"

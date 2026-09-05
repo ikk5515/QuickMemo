@@ -5,11 +5,13 @@ import { canonicalSafeExternalHttpUrl } from "../markdown/parser";
 import { normalizeVaultPath } from "../vault/interop/path";
 import { decodeVaultAsset, encodeVaultAsset, safeVaultAssetPreviewKind } from "../vault/vaultAsset";
 import { vaultEntryPath, type DecryptedVaultFolder, type DecryptedVaultNote } from "../vault/vaultData";
-import { PUBLISHED_WIKI_LIMITS, type PreparedWikiPublication, type WikiPublicationEntryInput } from "./publishedWikiTypes";
+import { PUBLISHED_WIKI_LIMITS, type PreparedWikiPublication, type WikiPublicationEntryInput, type WikiPublicationSelection } from "./publishedWikiTypes";
 import { rewritePublicationMarkdownLinks, type RewritePublicationMarkdownLink } from "./publicationMarkdown";
 
 interface PrepareWikiPublicationInput {
-  rootFolderId: string;
+  rootFolderId: string | null;
+  ownerUid?: string;
+  selection?: WikiPublicationSelection;
   notes: readonly DecryptedVaultNote[];
   folders: readonly DecryptedVaultFolder[];
   title?: string;
@@ -73,29 +75,46 @@ function escapedLabel(label: string) {
 }
 
 
-export function prepareWikiPublication({ rootFolderId, notes, folders, title, expiresAt = null }: PrepareWikiPublicationInput): PreparedWikiPublication {
+export function prepareWikiPublication({ rootFolderId, ownerUid, selection, notes, folders, title, expiresAt = null }: PrepareWikiPublicationInput): PreparedWikiPublication {
   const foldersById = uniqueById(folders);
   uniqueById(notes);
-  const root = foldersById.get(rootFolderId);
-  if (!root || !root.ownerUid || !activeFolderPath(rootFolderId, foldersById)) throw new Error("공개할 폴더를 다시 확인해 주세요.");
-  const titleValue = safeName(title ?? root.displayName);
+  const root = rootFolderId ? foldersById.get(rootFolderId) : null;
+  const uid = root?.ownerUid ?? ownerUid;
+  if (!uid || (rootFolderId && (!root || !activeFolderPath(rootFolderId, foldersById)))) throw new Error("공개할 폴더를 다시 확인해 주세요.");
+  if (!rootFolderId && (!selection || new Set(selection.folderIds).size !== selection.folderIds.length || new Set(selection.noteIds).size !== selection.noteIds.length)) throw new Error("공개할 목록을 다시 확인해 주세요.");
+  const titleValue = safeName(title ?? root?.displayName ?? "나의 위키");
   if (expiresAt !== null && (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()
     || Date.parse(expiresAt) > Date.now() + 366 * 86_400_000)) throw new Error("공개 만료일을 확인해 주세요.");
   const children = new Map<string, DecryptedVaultFolder[]>();
   for (const folder of folders) {
-    if (folder.ownerUid !== root.ownerUid || folder.isDeleted || folder.nameDecryptionFailed || !folder.parentId) continue;
+    if (folder.ownerUid !== uid || folder.isDeleted || folder.nameDecryptionFailed || !folder.parentId) continue;
     const siblings = children.get(folder.parentId) ?? [];
     siblings.push(folder);
     children.set(folder.parentId, siblings);
   }
-  const selected = [root];
+  const requestedRoots = root ? [root] : (selection?.folderIds ?? []).flatMap((id) => {
+    const folder = foldersById.get(id);
+    if (!folder || folder.isDeleted) return [];
+    if (folder.ownerUid !== uid || !activeFolderPath(id, foldersById)) throw new Error("공개할 폴더의 권한을 확인해 주세요.");
+    return [folder];
+  });
+  const requestedRootIds = new Set(requestedRoots.map((folder) => folder.id));
+  const selected = requestedRoots.filter((folder) => {
+    let parent = folder.parentId;
+    for (let depth = 0; parent && depth <= maximumFolderDepth; depth += 1) {
+      if (requestedRootIds.has(parent)) return false;
+      parent = foldersById.get(parent)?.parentId;
+    }
+    return true;
+  });
+  const selectedRootIds = new Set(selected.map((folder) => folder.id));
   const folderPaths = new Map<string, string>();
   const folderPathKeys = new Set<string>();
   for (let index = 0; index < selected.length; index += 1) {
     if (selected.length > PUBLISHED_WIKI_LIMITS.folders) throw new Error("한 번에 공개할 수 있는 폴더 수를 초과했습니다.");
     const folder = selected[index];
     const name = safeName(folder.displayName);
-    const path = folder.id === rootFolderId ? name : `${folderPaths.get(folder.parentId!)}/${name}`;
+    const path = selectedRootIds.has(folder.id) ? name : `${folderPaths.get(folder.parentId!)}/${name}`;
     const pathKey = normalizeVaultPath(path).toLocaleLowerCase("en-US");
     if (folderPathKeys.has(pathKey)) throw new Error("공개 범위에 이름이 같은 폴더가 있습니다. 이름을 확인해 주세요.");
     folderPathKeys.add(pathKey);
@@ -111,6 +130,8 @@ export function prepareWikiPublication({ rootFolderId, notes, folders, title, ex
   const currentNotes = notes.filter((note) => !note.isDeleted && !note.isPurged
     && (!note.secureShareCopyState || note.secureShareCopyState === "active")
     && (!note.folderId || privateFolderPaths.has(note.folderId)));
+  const selectedNoteIds = new Set(rootFolderId ? [] : selection?.noteIds ?? []);
+  if (currentNotes.some((note) => selectedNoteIds.has(note.id) && note.ownerUid !== uid)) throw new Error("공개할 메모의 권한을 확인해 주세요.");
   const sourceEntries: VaultIndexEntry[] = currentNotes.map((note) => ({
     id: note.id, kind: note.entryKind, path: vaultEntryPath(note, privateFolderPaths)
   }));
@@ -122,9 +143,10 @@ export function prepareWikiPublication({ rootFolderId, notes, folders, title, ex
   let noteCount = 0;
   let assetCount = 0;
   for (const note of currentNotes) {
-    if (note.ownerUid !== root.ownerUid || !note.folderId || !folderPaths.has(note.folderId)) continue;
+    const includedFolder = Boolean(note.folderId && folderPaths.has(note.folderId));
+    if (note.ownerUid !== uid || (!includedFolder && !selectedNoteIds.has(note.id))) continue;
     if (note.entryKind !== "markdown" && note.entryKind !== "legacy-html" && note.entryKind !== "asset") { omittedEntryCount += 1; continue; }
-    if (!note.participantUids.includes(root.ownerUid)
+    if (!note.participantUids.includes(uid)
       || note.contentFormat !== (note.entryKind === "asset" ? "asset-v1" : note.entryKind === "markdown" ? "markdown-v1" : "legacy-html-v1")) {
       throw new Error("공개할 메모의 권한과 저장 형식을 다시 확인해 주세요.");
     }
@@ -139,14 +161,15 @@ export function prepareWikiPublication({ rootFolderId, notes, folders, title, ex
     } else noteCount += 1;
     if (noteCount > PUBLISHED_WIKI_LIMITS.notes || assetCount > PUBLISHED_WIKI_LIMITS.assets) throw new Error("한 번에 공개할 수 있는 메모 또는 이미지 수를 초과했습니다.");
     const noteTitle = safeName(note.title);
-    const path = vaultEntryPath({ ...note, title: noteTitle }, folderPaths);
+    const path = vaultEntryPath({ ...note, title: noteTitle, folderId: includedFolder ? note.folderId : null }, folderPaths);
     const pathKey = normalizeVaultPath(path).toLocaleLowerCase("en-US");
     if (publicPaths.has(pathKey)) throw new Error("공개 범위에 이름이 같은 파일이 있습니다. 이름을 확인해 주세요.");
     publicPaths.add(pathKey);
     if (utf8.encode(body).length > (note.entryKind === "asset" ? PUBLISHED_WIKI_LIMITS.assetBytes : PUBLISHED_WIKI_LIMITS.textBytes)) throw new Error("공개할 메모 또는 이미지의 크기 제한을 초과했습니다.");
     if (!Number.isSafeInteger(note.revision ?? 0) || (note.revision ?? 0) < 0) throw new Error("최신 저장 내용을 확인한 뒤 다시 공개해 주세요.");
     prepared.set(note.id, { note, path, body, metadata: {
-      sourceNoteId: note.id, sourceRevision: note.revision ?? 0, sourceFolderId: note.folderId,
+      sourceNoteId: note.id, sourceRevision: note.revision ?? 0, sourceFolderId: note.folderId ?? null,
+      ...(!rootFolderId ? { parentSourceFolderId: includedFolder ? note.folderId ?? null : null } : {}),
       title: noteTitle, kind: note.entryKind
     } });
   }
@@ -215,7 +238,8 @@ export function prepareWikiPublication({ rootFolderId, notes, folders, title, ex
   return {
     manifest: {
       rootFolderId, title: titleValue, expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
-      folders: selected.map((folder) => ({ sourceFolderId: folder.id, parentSourceFolderId: folder.id === rootFolderId ? null : folder.parentId!, name: safeName(folder.displayName) })),
+      ...(!rootFolderId ? { selection: { folderIds: [...selectedRootIds], noteIds: currentNotes.filter((note) => selectedNoteIds.has(note.id) && note.ownerUid === uid).map((note) => note.id) } } : {}),
+      folders: selected.map((folder) => ({ sourceFolderId: folder.id, parentSourceFolderId: selectedRootIds.has(folder.id) ? null : folder.parentId!, name: safeName(folder.displayName) })),
       entries: [...prepared.values()].map((entry) => entry.metadata)
     },
     contents, omittedEntryCount, redactedLinkCount, totalBytes

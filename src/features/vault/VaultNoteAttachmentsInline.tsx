@@ -27,6 +27,13 @@ export function VaultNoteAttachmentsInline({
   const hasMore = attachments.length > visibleAttachmentSummaryCount;
   const countLabel = `${attachments.length}개`;
 
+  if (!attachments.length && !loading && !error) {
+    return <section aria-label="노트 첨부파일" className="vault-note-attachments-inline is-empty">
+      <button aria-label="노트에 파일 추가" className="vault-note-attachments-inline-manage" disabled={disabled}
+        onClick={(event) => onManage(event.currentTarget)} title="첨부파일 추가" type="button"><Paperclip aria-hidden="true" size={17} /></button>
+    </section>;
+  }
+
   return (
     <section aria-label="노트 첨부파일" className="vault-note-attachments-inline">
       <div className="vault-note-attachments-inline-label">

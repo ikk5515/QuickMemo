@@ -148,26 +148,28 @@ describe("VaultPage built-in knowledge tool wiring", () => {
     );
     expect(recovery).toContain("pathRewriteRecoveryBusyOwnerRef.current = generation");
     expect(source).toContain("const pathRewriteContentLocked = pathRewriteBusy");
-    expect(source).toContain("readOnly={viewMode === \"reading\" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}");
+    expect(source).toContain("readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked || conflictedEntryIds.has(activeNote.id)}");
   });
 
   it("uses one CodeMirror editor surface for inline live preview", () => {
-    expect(source).toContain('mode === "live-preview" ? "라이브 프리뷰" : "읽기 보기"');
-    expect(source).toContain('mode === "live-preview" ? "라이브" : "읽기"');
+    expect(source).not.toContain("setViewMode");
+    expect(source).toContain('const viewMode: MarkdownViewMode = "live-preview"');
+    expect(source).toContain('aria-label="문서 메뉴"');
     expect(source).toContain("<VaultMarkdownEditor");
     expect(source).toContain("livePreview");
     expect(source).not.toContain('className="vault-live-preview"');
   });
 
-  it("limits Page Preview to resolved links in sanitized reading and live-preview views", () => {
+  it("limits Page Preview to resolved links in the single live editor", () => {
     expect(source).toContain("function handleMarkdownLinkPreviewInteraction");
-    expect(source).toContain('(viewMode !== "reading" && viewMode !== "live-preview") || reference.kind === "external"');
+    expect(source).toContain('reference.kind === "external"');
     expect(source).toContain("const target = resolution?.targetEntryId");
     expect(source).toContain("noteById.get(resolution.targetEntryId)");
     expect(source).toContain("onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}");
     expect(source).toContain("createVaultPagePreviewContent({");
     expect(source).toContain("onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}");
     expect(source.match(/onLinkPreviewInteraction=/gu)).toHaveLength(2);
+    expect(source).toContain("onLinkPreviewInteraction={context.onLinkPreviewInteraction}");
     expect(source).toContain("plaintext popup before paint");
   });
 

@@ -22,7 +22,7 @@ function sourceBetween(start: string, end: string) {
 }
 
 function ruleBodiesForSelector(css: string, selector: string) {
-  return [...css.matchAll(/([^{}]+)\{([^{}]*)\}/gu)]
+  return [...css.replace(/\/\*[\s\S]*?\*\//gu, "").matchAll(/([^{}]+)\{([^{}]*)\}/gu)]
     .filter((match) => match[1]
       .split(",")
       .some((candidate) => candidate.trim() === selector))
@@ -30,6 +30,55 @@ function ruleBodiesForSelector(css: string, selector: string) {
 }
 
 describe("Vault workspace UI regression contract", () => {
+  it("pins legacy conversion to the chosen panel and opens its new Wiki copy without replacing the HTML source", () => {
+    expect(source).toContain('<VaultLegacyNote body={note.body} entryId={note.id} onCreateMarkdownCopy={stableConvertLegacyNote} />');
+    expect(source).toContain('<VaultLegacyNote body={activeNote.body} entryId={activeNote.id} onCreateMarkdownCopy={convertLegacyNote} />');
+    expect(sourceBetween("function convertLegacyNote(", "async function createNormalizedMarkdownCopy("))
+      .toContain('openCoreTool("format", entryId)');
+    const openTool = sourceBetween("function openCoreTool(", "function handleCommand(");
+    expect(openTool).toContain("notesRef.current.find((note) => note.id === entryId)");
+    expect(openTool).toContain("setFormatSourceEntryId(formatSource?.id ?? null)");
+    const converter = sourceBetween("<LazyVaultFormatConverter", "<LazyVaultNoteComposer");
+    for (const property of ["body", "folderId", "id", "revision", "title"]) {
+      expect(converter).toContain(`formatSourceNote.${property}`);
+      expect(converter).not.toContain(`activeNote.${property}`);
+    }
+    const createCopy = sourceBetween("async function createConvertedMarkdownCopy(", "function openCoreTool(");
+    expect(createCopy).toContain('if (surface === "wiki")');
+    expect(createCopy).toContain("setWikiOpenDocumentRequest({ id: result.noteId");
+    expect(createCopy).toContain("setActiveCoreTool(null)");
+    expect(createCopy).not.toMatch(/updateRevisionedNote|updateEncryptedNote|deleteRevisionedNote/u);
+  });
+
+  it("keeps resize dividers stationary during pointer and keyboard changes while animating ordinary collapse", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-workspace:not(.vault-workspace--wiki)")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/transition:\s*grid-template-columns\s+180ms\s+ease;/u)
+    ]));
+    for (const selector of [
+      '.vault-workspace:has(.qm-sidebar-resizer[data-resizing="true"])',
+      ".vault-workspace:has(.qm-sidebar-resizer:focus)",
+      ".vault-workspace:has(.vault-right-panel-resizer:active)",
+      ".vault-workspace:has(.vault-right-panel-resizer:focus)"
+    ]) {
+      expect(ruleBodiesForSelector(styles, selector)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/transition:\s*none;/u)
+      ]));
+    }
+  });
+
+  it("overrides global button minimums for compact mouse controls while preserving touch targets", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-tree-row")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/height:\s*28px;[\s\S]*min-height:\s*28px;/u),
+      expect.stringMatching(/height:\s*44px;[\s\S]*min-height:\s*44px;/u)
+    ]));
+    for (const selector of [".vault-panel-toolbar button", ".vault-left-panel header > button"]) {
+      expect(ruleBodiesForSelector(styles, selector)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/height:\s*32px;[\s\S]*min-height:\s*32px;/u),
+        expect.stringMatching(/min-height:\s*44px;/u)
+      ]));
+    }
+  });
+
   it("keeps path rewrite policy static while lazy-loading async controller work", () => {
     expect(source).toContain('from "../features/vault/pathRewriteControllerCore";');
     expect(source).toContain(
@@ -66,15 +115,14 @@ describe("Vault workspace UI regression contract", () => {
     }
   });
 
-  it("keeps one shared attachment shelf outside all Markdown view-mode branches", () => {
+  it("keeps one shared attachment shelf above the single live Markdown editor", () => {
     const markdownContent = sourceBetween(
       '<div className="vault-note-content">',
       '<div className="vault-empty-state">'
     );
     const shelfIndex = markdownContent.indexOf("<LazyVaultNoteAttachmentsRegion");
-    const pluginIndex = markdownContent.indexOf('activeMarkdownPluginView && viewMode !== "source"');
-    const readingIndex = markdownContent.indexOf('viewMode === "reading"');
-    const livePreviewIndex = markdownContent.indexOf('viewMode === "live-preview"');
+    const pluginIndex = markdownContent.indexOf("activeMarkdownPluginView ?");
+    const livePreviewIndex = markdownContent.indexOf("<VaultMarkdownEditor");
 
     expect(source).toContain('import("../features/vault/VaultNoteAttachmentsRegion")');
     expect(attachmentRegionSource).toContain("useVaultNoteAttachments(access.allowed ? note.id : null)");
@@ -82,10 +130,10 @@ describe("Vault workspace UI regression contract", () => {
     expect(attachmentRegionSource).toContain("<LazyVaultNoteAttachmentsDialog");
     expect(markdownContent).not.toContain("vault-note-markdown-surface");
     expect(markdownContent).not.toContain("vault-note-markdown-body");
-    expect(markdownContent).toMatch(/<MarkdownRenderer\s+className="vault-markdown-renderer"/u);
+    expect(markdownContent).not.toContain("<MarkdownRenderer");
+    expect(markdownContent).toMatch(/<VaultMarkdownEditor[\s\S]*?\s+livePreview\s/u);
     expect(shelfIndex).toBeGreaterThanOrEqual(0);
     expect(pluginIndex).toBeGreaterThan(shelfIndex);
-    expect(readingIndex).toBeGreaterThan(shelfIndex);
     expect(livePreviewIndex).toBeGreaterThan(shelfIndex);
     expect(attachmentRegionSource).toContain("const [returnFocusTo, setReturnFocusTo]");
     expect(attachmentRegionSource).toContain("onManage={setReturnFocusTo}");
@@ -224,6 +272,16 @@ describe("Vault workspace UI regression contract", () => {
   });
 
   it("consumes each route panel intent once so the hamburger can stay closed", () => {
+    const consumeIntent = sourceBetween("const consumeWorkspacePanelIntent = useCallback(", "const closeLeftPanel = useCallback(");
+    expect(consumeIntent).toContain("handledWorkspaceRouteIntentRef.current = JSON.stringify(");
+    expect(consumeIntent).toContain("new URLSearchParams(searchParams)");
+    expect(consumeIntent).toContain('next.delete("panel")');
+    expect(consumeIntent).toContain("{ replace: true, state: location.state }");
+    expect(consumeIntent).toContain("hash: location.hash");
+    expect(consumeIntent).not.toContain('next.delete("entry")');
+    for (const [start, end] of [["const closeLeftPanel = useCallback(", "const closeRightPanel = useCallback("], ["const toggleLeftPanel = useCallback(", "const toggleRightPanel = useCallback("]]) {
+      expect(sourceBetween(start, end)).toContain("consumeWorkspacePanelIntent();");
+    }
     expect(source).toContain("const handledWorkspaceRouteIntentRef = useRef<string | null>(null);");
     const routeIntent = sourceBetween(
       "const routeIntentKey = JSON.stringify([",
@@ -244,7 +302,7 @@ describe("Vault workspace UI regression contract", () => {
       "const showRightPanel = useCallback("
     );
     expect(showLeftPanel).not.toContain("[leftOpen,");
-    expect(showLeftPanel).toContain("[mobileLayout, rememberMobileDrawerTrigger]");
+    expect(showLeftPanel).toContain("[consumeWorkspacePanelIntent, mobileLayout, rememberMobileDrawerTrigger]");
   });
 
   it("offers a copy-only Markdown normalization for complete HTML blocks", () => {

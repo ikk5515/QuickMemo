@@ -54,6 +54,20 @@ export default defineConfig({
     }
   ],
   projects: [
+    ...(process.env.QUICKMEMO_E2E_EXTRA_BROWSERS === "true" ? [
+      {
+        name: "vault-firefox-desktop-1280",
+        testIgnore: ["**/vault-webkit-ui.vault.mjs"],
+        testMatch: ["**/*.vault.mjs"],
+        use: { browserName: "firefox", viewport: { width: 1280, height: 720 } }
+      },
+      {
+        name: "vault-chrome-desktop-1440",
+        testIgnore: ["**/vault-webkit-ui.vault.mjs"],
+        testMatch: ["**/*.vault.mjs"],
+        use: { browserName: "chromium", channel: "chrome", viewport: { width: 1440, height: 900 } }
+      }
+    ] : []),
     {
       name: "vault-chromium-desktop-1440",
       testIgnore: ["**/vault-webkit-ui.vault.mjs"],

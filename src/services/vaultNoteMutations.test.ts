@@ -109,6 +109,37 @@ describe("Vault note mutation API client", () => {
     vi.unstubAllGlobals();
   });
 
+  it("checks create cancellation after a pending auth token and before any request", async () => {
+    let finish!: (value: string) => void;
+    firebaseMocks.currentUser!.getIdToken = () => new Promise((resolve) => { finish = resolve; });
+    const controller = new AbortController();
+    const pending = mutateVaultNote(uid, vaultNoteCreatePayload(createInput), undefined, () => controller.signal.throwIfAborted());
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort(); finish("test-token"); await rejected;
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not dispatch an earlier user's mutation after auth changes during token loading", async () => {
+    let finish!: (value: string) => void;
+    firebaseMocks.currentUser!.getIdToken = () => new Promise((resolve) => { finish = resolve; });
+    const pending = mutateVaultNote(uid, vaultNoteCreatePayload(createInput));
+    const rejected = expect(pending).rejects.toMatchObject({ code: "authentication_required" });
+    firebaseMocks.currentUser = { uid: "another-owner", getIdToken: async () => "other-token" }; finish("old-token");
+    await rejected; expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("preserves an already-dispatched create receipt for rollback after the pre-send scope ends", async () => {
+    const controller = new AbortController();
+    let finish!: (value: Response) => void;
+    vi.mocked(fetch).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    const payload = vaultNoteCreatePayload(createInput);
+    const pending = mutateVaultNote(uid, payload, undefined, () => controller.signal.throwIfAborted());
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    controller.abort(); finish(jsonResponse({ ok: true, noteId: payload.noteId, revision: 1, lastMutationId: "receipt" }));
+    await expect(pending).resolves.toMatchObject({ noteId: payload.noteId, revision: 1, lastMutationId: "receipt" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it("publishes every server-owned Vault note mutation action", () => {
     expect(vaultNoteApiActions).toEqual([
       "access",

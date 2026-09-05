@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ auth: { currentUser: null as null | { uid: string; getIdToken: () => Promise<string> } }, getToken: vi.fn(), fetch: vi.fn() }));
 vi.mock("../lib/firebase", () => ({ auth: mocks.auth, appCheck: null }));
 vi.mock("firebase/app-check", () => ({ getToken: mocks.getToken }));
-import { getPublishedWikiAsset, getPublishedWikiContents, getPublishedWikiManifest, getPublishedWikiOwnerStatus, publishPreparedWiki, unpublishWiki } from "./publishedWikis";
+import { getPublishedWikiAsset, getPublishedWikiContents, getPublishedWikiManifest, getPublishedWikiOwnerStatus, publishPreparedWiki, unpublishWiki, getPublishedWikiWorkspaceStatus, checkPublishedWikiSlugAvailability, setPublishedWikiSlug } from "./publishedWikis";
 import type { PreparedWikiPublication } from "../features/wiki/publishedWikiTypes";
 const wikiId = `pw1_${"a".repeat(32)}`;
 const entryId = `e_${"a".repeat(32)}`;
@@ -21,7 +21,7 @@ beforeEach(() => {
 describe("published wiki client authority and bounded requests", () => {
   it("reads public manifests without Firebase login, cookies, or durable cache and strips unknown fields", async () => {
     mocks.auth.currentUser = null; mocks.fetch.mockResolvedValue(response({ ...manifest, ownerUid: "must-not-propagate" }));
-    expect(await getPublishedWikiManifest(wikiId)).toEqual(manifest);
+    expect(await getPublishedWikiManifest(wikiId)).toEqual({ ...manifest, slug: null });
     expect(mocks.fetch).toHaveBeenCalledWith(`/api/published-wikis?action=manifest&wikiId=${wikiId}`, expect.objectContaining({ method: "GET", credentials: "omit", cache: "no-store", headers: { "x-quickmemo-published-wiki": "1" } }));
   });
   it("pins owner auth before and after token awaits", async () => {
@@ -40,7 +40,7 @@ describe("published wiki client authority and bounded requests", () => {
     const progress = vi.fn();
     mocks.fetch.mockImplementation(async (_url, request: RequestInit) => { const body = JSON.parse(request.body as string); return response(body.action === "begin" ? stage : body.action === "activate" ? status : { uploadedCount: 1 }); });
     const large = { ...prepared, contents: Array.from({ length: 10 }, (_, index) => ({ sourceNoteId: `note-${index}`, body: "가".repeat(40_000) })) };
-    expect(await publishPreparedWiki(large, 0, { expectedUid: "owner", onProgress: progress })).toEqual(status);
+    expect(await publishPreparedWiki(large, 0, { expectedUid: "owner", onProgress: progress })).toEqual({ ...status, slug: null, selection: { folderIds: [], noteIds: [] }, manifest: null, legacyPublications: [], legacyHasMore: false });
     const calls = mocks.fetch.mock.calls; expect(action(calls[0])).toBe("begin"); expect(action(calls.at(-1)!)).toBe("activate");
     const uploads = calls.filter((call) => action(call) === "upload"); expect(uploads).toHaveLength(2);
     for (const call of uploads) expect(new TextEncoder().encode(JSON.stringify(JSON.parse(call[1].body).contents)).length).toBeLessThanOrEqual(1024 * 1024);
@@ -93,5 +93,41 @@ describe("published wiki client authority and bounded requests", () => {
     mocks.fetch.mockResolvedValueOnce(response({ ...manifest, wikiId: `pw1_${"b".repeat(32)}` })).mockResolvedValueOnce(response({ ...manifest, folders: [] }));
     await expect(getPublishedWikiManifest(wikiId)).rejects.toMatchObject({ code: "invalid_response" });
     await expect(getPublishedWikiManifest(wikiId)).rejects.toMatchObject({ code: "invalid_response" });
+  });
+});
+
+describe("owner workspace slug contract", () => {
+  it("normalizes slug claims and availability while retaining authenticated ownership checks", async () => {
+    mocks.fetch.mockResolvedValueOnce(response({ slug: "ingi", available: true })).mockResolvedValueOnce(response({ ...status, slug: "ingi" }));
+    expect(await checkPublishedWikiSlugAvailability(" InGi ")).toEqual({ slug: "ingi", available: true });
+    expect((await setPublishedWikiSlug(" InGi ", 0)).slug).toBe("ingi");
+    expect(mocks.fetch.mock.calls.map(action)).toEqual(["slug-availability", "set-slug"]);
+    expect(JSON.parse(mocks.fetch.mock.calls[1][1].body)).toEqual({ action: "set-slug", slug: "ingi", expectedRevision: 0 });
+  });
+  it("passes only explicit owned legacy migration IDs and workspace revocation uses null root", async () => {
+    mocks.fetch.mockResolvedValue(response({ ...status, slug: "ingi" }));
+    await setPublishedWikiSlug("ingi", 1, { legacyWikiId: wikiId });
+    expect(JSON.parse(mocks.fetch.mock.calls[0][1].body).legacyWikiId).toBe(wikiId);
+    await unpublishWiki(null, 2); expect(JSON.parse(mocks.fetch.mock.calls[1][1].body).rootFolderId).toBeNull();
+  });
+  it("reads slug manifests with root-level notes and rejects responses for another slug", async () => {
+    const payload = { ...manifest, slug: "ingi", folders: [], entries: [{ ...entry, folderId: null, path: "Start.md" }] };
+    mocks.auth.currentUser = null; mocks.fetch.mockResolvedValueOnce(response(payload)).mockResolvedValueOnce(response({ ...payload, slug: "other" }));
+    expect(await getPublishedWikiManifest("ingi")).toEqual(payload);
+    expect(mocks.fetch.mock.calls[0][0]).toBe("/api/published-wikis?action=manifest&slug=ingi");
+    await expect(getPublishedWikiManifest("ingi")).rejects.toMatchObject({ code: "invalid_response" });
+  });
+  it("reads owner-only grants with a bounded legacy list and no copy bodies or unknown secrets", async () => {
+    const value = { ...status, slug: "ingi", selection: { folderIds: ["root"], noteIds: [] }, manifest: prepared.manifest, privateKey: "forbidden", legacyPublications: [] };
+    mocks.fetch.mockResolvedValue(response(value));
+    const result = await getPublishedWikiWorkspaceStatus(); expect(result.selection).toEqual(value.selection); expect(result.manifest).toEqual(prepared.manifest); expect(result).not.toHaveProperty("privateKey");
+    expect(action(mocks.fetch.mock.calls[0])).toBe("owner-status");
+  });
+  it.each(["ab", "admin", "../ingi", "ｉｎｇｉ", "in gi", "a".repeat(41)])("blocks invalid slug %s before network", async (slug) => {
+    await expect(setPublishedWikiSlug(slug, 0)).rejects.toMatchObject({ code: "invalid_slug" }); expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+  it("keeps late slug changes from crossing logout/account boundaries", async () => {
+    mocks.fetch.mockImplementation(async () => { mocks.auth.currentUser = null; return response({ ...status, slug: "ingi" }); });
+    await expect(setPublishedWikiSlug("ingi", 0)).rejects.toMatchObject({ name: "AbortError" });
   });
 });

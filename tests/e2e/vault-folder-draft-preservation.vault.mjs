@@ -1,12 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import { expectCleanRuntime, loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario, unlockEncryptedVault } from "./helpers.mjs";
 
 async function createSavedNote(page, title, body) {
   await page.locator('.vault-panel-toolbar button[aria-label="새 노트"]').click();
   await page.getByLabel("노트 이름").fill(title);
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(body);
-  await page.getByRole("button", { name: "저장", exact: true }).click();
+  await saveVaultDocument(page);
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const tabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
   expect(tabId).toMatch(/^entry:/u);
@@ -42,7 +43,7 @@ test("remote folder trash preserves an unrelated authorized dirty draft", async 
     await loginDirectly(editing, fixture.viewerAuth, editingDiagnostics);
     await navigateWithinApp(editing, `/app?entry=${encodeURIComponent(keptId)}`);
     await expect(editing.getByLabel("노트 이름")).toHaveValue("유지할 메모");
-    await editing.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     // Hold only this fixture's writes so the remote folder snapshot arrives
     // while its draft is definitely unsaved, independent of CI machine speed.
     await editing.route("**/api/vault-notes", async (route) => {
@@ -57,7 +58,7 @@ test("remote folder trash preserves an unrelated authorized dirty draft", async 
     await expect(editing.getByRole("treeitem", { name: "다른 기기에서 삭제할 폴더", exact: true })).toHaveCount(0);
     await expect(editing.getByLabel("노트 이름")).toHaveValue("유지할 메모");
     const source = editing.getByRole("textbox", { name: "Markdown 편집기" });
-    await expect.poll(async () => (await source.locator(".cm-line").allTextContents()).join("\n")).toBe(localBody);
+    await expect.poll(async () => await readVaultEditorSource(source)).toBe(localBody);
     await expect(editing.getByRole("tab", { name: /숨겨질 메모/u })).toHaveCount(0);
 
     releaseSaves();
@@ -65,8 +66,8 @@ test("remote folder trash preserves an unrelated authorized dirty draft", async 
     await expect(editing.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved");
     await editing.reload();
     await unlockEncryptedVault(editing, fixture.viewerAuth.password);
-    await editing.getByRole("button", { name: "소스 모드", exact: true }).click();
-    await expect.poll(async () => (await source.locator(".cm-line").allTextContents()).join("\n")).toBe(localBody);
+
+    await expect.poll(async () => await readVaultEditorSource(source)).toBe(localBody);
     await expectCleanRuntime(diagnostics, fixture);
     await expectCleanRuntime(editingDiagnostics, fixture, [localBody]);
   } finally {

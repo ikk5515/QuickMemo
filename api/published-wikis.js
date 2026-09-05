@@ -22,6 +22,16 @@ const sourceFields = ["ownerUid", "folderId", "parentId", "isDeleted", "isPurged
   "contentFormat", "entryKind", "revision", "secureShareCopyState"];
 
 const wikiPath = (wikiId) => `publishedWikis/${wikiId}`;
+const ownerPath = (uid) => `publishedWikiOwners/${sha256Digest(uid)}`;
+const slugPath = (slug) => `publishedWikiSlugs/${slug}`;
+const reservedSlugs = new Set(["admin", "api", "login", "logout", "signup", "settings", "new", "edit", "public", "private", "assets", "static", "setup", "home", "app", "wiki", "library", "schedule", "recurring", "share", "s", "legacy"]);
+function normalizeSlug(value) {
+  if (typeof value !== "string" || value.length > 100) throw new HttpError(400, "invalid_slug");
+  const slug = value.trim().replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+  if (!/^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/u.test(slug)) throw new HttpError(400, "invalid_slug");
+  if (reservedSlugs.has(slug)) throw new HttpError(400, "reserved_slug");
+  return slug;
+}
 const rootPath = (uid, rootFolderId) => `publishedWikiRoots/${sha256Digest(`${uid}\n${rootFolderId}`)}`;
 const entryId = (wikiId, sourceId) => `e_${Buffer.from(sha256Digest(`${wikiId}\nentry\n${sourceId}`), "base64url").toString("hex").slice(0, 32)}`;
 const folderId = (wikiId, sourceId) => `f_${Buffer.from(sha256Digest(`${wikiId}\nfolder\n${sourceId}`), "base64url").toString("hex").slice(0, 32)}`;
@@ -61,7 +71,7 @@ function sourceKind(note) {
 }
 function sourceActive(note, uid, expectedKind) {
   return note?.ownerUid === uid && note.isDeleted !== true && note.isPurged !== true
-    && ["personal", "shared"].includes(note.type) && note.participantUids?.includes(uid)
+    && ["personal", "shared"].includes(note.type) && Array.isArray(note.participantUids) && note.participantUids.includes(uid)
     && (!note.secureShareCopyState || note.secureShareCopyState === "active")
     && sourceKind(note) === expectedKind;
 }
@@ -76,9 +86,18 @@ function subtreeContains(tree, rootFolderId, candidateId) {
   return false;
 }
 function assertManifest(input) {
-  assertOnlyKeys(input, ["rootFolderId", "title", "expiresAt", "folders", "entries"]);
-  const rootFolderId = assertVaultFolderId(input.rootFolderId);
-  if (!Array.isArray(input.folders) || !input.folders.length || input.folders.length > limits.folders
+  assertOnlyKeys(input, ["rootFolderId", "selection", "title", "expiresAt", "folders", "entries"]);
+  const workspace = input.rootFolderId === null;
+  const rootFolderId = workspace ? null : assertVaultFolderId(input.rootFolderId);
+  let selection;
+  if (workspace) {
+    assertOnlyKeys(input.selection, ["folderIds", "noteIds"]);
+    if (!Array.isArray(input.selection.folderIds) || input.selection.folderIds.length > limits.folders
+      || !Array.isArray(input.selection.noteIds) || input.selection.noteIds.length > limits.notes + limits.assets) throw new HttpError(413, "publication_too_large");
+    selection = { folderIds: input.selection.folderIds.map(assertVaultFolderId), noteIds: input.selection.noteIds.map((id) => safeId(id)) };
+    if (new Set(selection.folderIds).size !== selection.folderIds.length || new Set(selection.noteIds).size !== selection.noteIds.length) throw new HttpError(400, "invalid_request");
+  } else if (input.selection !== undefined) throw new HttpError(400, "invalid_request");
+  if (!Array.isArray(input.folders) || (!workspace && !input.folders.length) || input.folders.length > limits.folders
     || !Array.isArray(input.entries) || input.entries.length > limits.notes + limits.assets) throw new HttpError(413, "publication_too_large");
   const folders = input.folders.map((folder) => {
     assertOnlyKeys(folder, ["sourceFolderId", "parentSourceFolderId", "name"]);
@@ -86,21 +105,25 @@ function assertManifest(input) {
       parentSourceFolderId: folder.parentSourceFolderId === null ? null : assertVaultFolderId(folder.parentSourceFolderId), name: safeName(folder.name) };
   });
   const folderIds = new Set(folders.map((folder) => folder.sourceFolderId));
-  if (folderIds.size !== folders.length || !folderIds.has(rootFolderId)
-    || folders.some((folder) => folder.sourceFolderId === rootFolderId
-      ? folder.parentSourceFolderId !== null : !folder.parentSourceFolderId || !folderIds.has(folder.parentSourceFolderId))) throw new HttpError(400, "invalid_request");
+  if (folderIds.size !== folders.length || (!workspace && !folderIds.has(rootFolderId))
+    || folders.some((folder) => folder.parentSourceFolderId === null
+      ? !(workspace ? selection.folderIds.includes(folder.sourceFolderId) : folder.sourceFolderId === rootFolderId)
+      : folder.sourceFolderId === rootFolderId || !folderIds.has(folder.parentSourceFolderId))) throw new HttpError(400, "invalid_request");
   const entries = input.entries.map((entry) => {
-    assertOnlyKeys(entry, ["sourceNoteId", "sourceRevision", "sourceFolderId", "title", "kind"]);
+    assertOnlyKeys(entry, ["sourceNoteId", "sourceRevision", "sourceFolderId", "parentSourceFolderId", "title", "kind"]);
     if (!["markdown", "legacy-html", "asset"].includes(entry.kind)) throw new HttpError(400, "invalid_request");
-    const sourceFolderId = assertVaultFolderId(entry.sourceFolderId);
-    if (!folderIds.has(sourceFolderId)) throw new HttpError(403, "publication_scope_denied");
-    return { sourceNoteId: safeId(entry.sourceNoteId), sourceRevision: integer(entry.sourceRevision), sourceFolderId,
-      title: safeName(entry.title), kind: entry.kind };
+    const sourceFolderId = workspace && entry.sourceFolderId === null ? null : assertVaultFolderId(entry.sourceFolderId);
+    const sourceNoteId = safeId(entry.sourceNoteId);
+    const parent = workspace ? entry.parentSourceFolderId : sourceFolderId;
+    if (workspace && parent !== null) assertVaultFolderId(parent);
+    if (parent === null ? !workspace || !selection.noteIds.includes(sourceNoteId) : !folderIds.has(parent) || parent !== sourceFolderId) throw new HttpError(403, "publication_scope_denied");
+    return { sourceNoteId, sourceRevision: integer(entry.sourceRevision), sourceFolderId,
+      ...(workspace ? { parentSourceFolderId: parent } : {}), title: safeName(entry.title), kind: entry.kind };
   });
   if (new Set(entries.map((entry) => entry.sourceNoteId)).size !== entries.length
     || entries.filter((entry) => entry.kind === "asset").length > limits.assets
     || entries.filter((entry) => entry.kind !== "asset").length > limits.notes) throw new HttpError(413, "publication_too_large");
-  const manifest = { rootFolderId, title: safeName(input.title), expiresAt: expiry(input.expiresAt), folders, entries };
+  const manifest = { rootFolderId, ...(workspace ? { selection } : {}), title: safeName(input.title), expiresAt: expiry(input.expiresAt), folders, entries };
   if (byteLength(JSON.stringify(manifest)) > maximumManifestBytes) throw new HttpError(413, "publication_too_large");
   return manifest;
 }
@@ -151,13 +174,44 @@ async function scopeState(context, uid, rootFolderId, manifest, transaction) {
   return { tree, allowedFolders };
 }
 
+async function workspaceScopeState(context, uid, manifest, transaction) {
+  const [profile, treeDocument] = await firestoreBatchGet(context, [`users/${uid}`, `vaultFolderTrees/${uid}`], transaction);
+  if (!profileActive(profile) || (treeDocument && treeDocument.ownerUid !== uid)) throw notFound();
+  const tree = treeDocument ? validateVaultFolderTree({ schemaVersion: treeDocument.schemaVersion, revision: treeDocument.revision, folderCount: treeDocument.folderCount, nodes: treeDocument.nodes }) : { nodes: {} };
+  const ids = [...manifest.folders.map((folder) => folder.sourceFolderId), ...manifest.entries.map((entry) => entry.sourceFolderId).filter(Boolean)];
+  const sources = await readProjected(context, "noteFolders", ids, transaction);
+  const activeFolder = (id) => sources.get(id)?.ownerUid === uid && sources.get(id)?.isDeleted !== true
+    && tree.nodes[id]?.active && tree.nodes[id]?.parentId === (sources.get(id)?.parentId ?? null);
+  const allowedFolders = new Set();
+  for (const folder of manifest.folders) {
+    if (!activeFolder(folder.sourceFolderId)) continue;
+    const parent = folder.parentSourceFolderId;
+    if (parent === null ? manifest.selection.folderIds.includes(folder.sourceFolderId)
+      : parent === sources.get(folder.sourceFolderId)?.parentId) allowedFolders.add(folder.sourceFolderId);
+  }
+  // Reachability also rejects cycles and detached public paths without revealing private ancestors.
+  const byId = new Map(manifest.folders.map((folder) => [folder.sourceFolderId, folder]));
+  for (const id of [...allowedFolders]) {
+    let current = id; const seen = new Set();
+    while (current !== null && seen.size <= 32 && !seen.has(current) && allowedFolders.has(current)) {
+      seen.add(current); current = byId.get(current)?.parentSourceFolderId;
+    }
+    if (current !== null) allowedFolders.delete(id);
+  }
+  return { allowedFolders, activeFolder };
+}
 async function validateSources(context, site, manifest, transaction, strict) {
-  const scope = await scopeState(context, site.ownerUid, site.rootFolderId, manifest, transaction);
+  const workspace = manifest.rootFolderId === null;
+  const scope = workspace ? await workspaceScopeState(context, site.ownerUid, manifest, transaction)
+    : await scopeState(context, site.ownerUid, manifest.rootFolderId, manifest, transaction);
   const sources = await readProjected(context, "notes", manifest.entries.map((entry) => entry.sourceNoteId), transaction);
   const entries = manifest.entries.filter((entry) => {
     const current = sources.get(entry.sourceNoteId);
-    return sourceActive(current, site.ownerUid, entry.kind)
-      && scope.allowedFolders.has(entry.sourceFolderId) && current.folderId === entry.sourceFolderId
+    const placement = workspace ? entry.parentSourceFolderId : entry.sourceFolderId;
+    const allowed = placement === null ? workspace && manifest.selection.noteIds.includes(entry.sourceNoteId)
+      && (entry.sourceFolderId === null || scope.activeFolder(entry.sourceFolderId)) : scope.allowedFolders.has(placement);
+    return sourceActive(current, site.ownerUid, entry.kind) && allowed
+      && (current.folderId ?? null) === entry.sourceFolderId
       && (!strict || (current.revision ?? 0) === entry.sourceRevision);
   });
   if (strict && (entries.length !== manifest.entries.length || scope.allowedFolders.size !== manifest.folders.length)) throw new HttpError(409, "source_changed");
@@ -196,16 +250,76 @@ function writeSite(context, wikiId, previous, next) {
     : createDocumentWrite(context.projectId, wikiPath(wikiId), next);
 }
 function storedSite(document, wikiId, uid) {
-  if (!document || document.schemaVersion !== 1 || document.wikiId !== wikiId || document.ownerUid !== uid) throw notFound();
+  if (!document || ![1, 2].includes(document.schemaVersion) || document.wikiId !== wikiId || document.ownerUid !== uid) throw notFound();
   return document;
 }
 function ownerStatus(site) {
   const active = site?.active;
-  return { wikiId: site?.wikiId ?? null, revision: site?.revision ?? 0, published: site?.published === true,
+  const manifest = active ? { rootFolderId: active.rootFolderId, ...(active.selection ? { selection: active.selection } : {}),
+    title: active.title, expiresAt: active.expiresAt, folders: active.folders, entries: active.entries } : null;
+  return { wikiId: site?.wikiId ?? null, slug: site?.slug ?? null, revision: site?.revision ?? 0, published: site?.published === true,
     title: active?.title ?? "", expiresAt: active?.expiresAt ?? null, updatedAt: site?.updatedAt ?? null,
+    selection: active?.selection ?? { folderIds: active?.rootFolderId ? [active.rootFolderId] : [], noteIds: [] }, manifest,
     noteCount: active?.entries.filter((entry) => entry.kind !== "asset").length ?? 0,
     assetCount: active?.entries.filter((entry) => entry.kind === "asset").length ?? 0 };
 }
+function cleanDocument(document) {
+  const next = { ...document }; delete next.__id; delete next.__updateTime; delete next.__createTime; delete next.__name; return next;
+}
+async function legacySummaries(context, uid, canonicalId) {
+  const sites = await firestoreRunQuery(context, {
+    select: { fields: ["wikiId", "ownerUid", "rootFolderId", "published", "revision", "active.title"].map((fieldPath) => ({ fieldPath })) },
+    from: [{ collectionId: "publishedWikis" }], where: { fieldFilter: { field: { fieldPath: "ownerUid" }, op: "EQUAL", value: { stringValue: uid } } }, limit: 21
+  });
+  return { legacyHasMore: sites.length > 20, legacyPublications: sites.slice(0, 20).filter((site) => site.wikiId !== canonicalId && typeof site.rootFolderId === "string").map((site) => ({
+    wikiId: identifier(site.wikiId), rootFolderId: site.rootFolderId, title: site.active?.title ?? "", published: site.published === true, revision: site.revision
+  })) };
+}
+async function workspaceOwnerAction(context, uid, body) {
+  if (body.action === "slug-availability") {
+    assertOnlyKeys(body, ["action", "slug"]); const slug = normalizeSlug(body.slug);
+    const claim = await firestoreGet(context, slugPath(slug));
+    return { slug, available: !claim || claim.ownerUid === uid };
+  }
+  if (body.action === "owner-status") {
+    assertOnlyKeys(body, ["action"]);
+    const status = await transactionally(context, [ownerPath(uid), `users/${uid}`], async ([lookup, profile], transaction) => {
+      if (!profileActive(profile)) throw notFound();
+      const site = lookup ? storedSite((await firestoreBatchGet(context, [wikiPath(identifier(lookup.wikiId))], transaction))[0], lookup.wikiId, uid) : null;
+      return { value: ownerStatus(site) };
+    });
+    return { ...status, ...await legacySummaries(context, uid, status.wikiId) };
+  }
+  assertOnlyKeys(body, ["action", "slug", "expectedRevision", "legacyWikiId"]);
+  const slug = normalizeSlug(body.slug); const expectedRevision = integer(body.expectedRevision);
+  const legacyId = body.legacyWikiId === undefined ? null : identifier(body.legacyWikiId);
+  return transactionally(context, [ownerPath(uid), slugPath(slug), `users/${uid}`], async ([lookup, claim, profile], transaction) => {
+    if (!profileActive(profile)) throw notFound();
+    if (claim && claim.ownerUid !== uid) throw new HttpError(409, "slug_taken");
+    if (lookup && legacyId && lookup.wikiId !== legacyId) throw new HttpError(409, "workspace_exists");
+    const wikiId = lookup ? identifier(lookup.wikiId) : legacyId ?? `pw1_${randomToken(24)}`;
+    const [previous] = await firestoreBatchGet(context, [wikiPath(wikiId)], transaction);
+    if (previous) storedSite(previous, wikiId, uid);
+    if ((previous?.revision ?? 0) !== expectedRevision) throw new HttpError(409, "publication_changed");
+    if (lookup && !previous) throw notFound();
+    if (legacyId && !previous) throw notFound();
+    if (previous?.slug === slug && claim?.active === true && claim.wikiId === wikiId) return { value: ownerStatus(previous) };
+    const oldClaim = previous?.slug ? (await firestoreBatchGet(context, [slugPath(previous.slug)], transaction))[0] : null;
+    const next = { ...(previous ? cleanDocument(previous) : { wikiId, ownerUid: uid, rootFolderId: null, revision: 0, active: null, pending: null, published: false }),
+      schemaVersion: 2, slug, revision: (previous?.revision ?? 0) + 1, pending: null, updatedAt: new Date().toISOString(), cleanupAt: new Date() };
+    const claimFields = { wikiId, ownerUid: uid, active: true, updatedAt: new Date() };
+    const writes = [writeSite(context, wikiId, previous, next),
+      claim ? updateDocumentWrite(context.projectId, slugPath(slug), claimFields, Object.keys(claimFields), claim.__updateTime) : createDocumentWrite(context.projectId, slugPath(slug), claimFields)];
+    if (!lookup) writes.push(createDocumentWrite(context.projectId, ownerPath(uid), { wikiId, ownerUid: uid }));
+    if (oldClaim && previous.slug !== slug) {
+      if (oldClaim.ownerUid !== uid || oldClaim.wikiId !== wikiId) throw notFound();
+      const fields = { wikiId, ownerUid: uid, active: false, updatedAt: new Date() };
+      writes.push(updateDocumentWrite(context.projectId, slugPath(previous.slug), fields, Object.keys(fields), oldClaim.__updateTime));
+    }
+    return { writes, value: ownerStatus(next) };
+  });
+}
+
 async function obsoleteCopies(context, site, transaction, keepGeneration) {
   const copies = await firestoreRunQuery(context, {
     select: { fields: [{ fieldPath: "generation" }] }, from: [{ collectionId: "entries" }], limit: 2 * (limits.notes + limits.assets) + 1
@@ -223,16 +337,23 @@ function requireStage(site, body) {
 
 async function ownerAction(context, uid, body) {
   const action = body.action;
+  if (["owner-status", "slug-availability", "set-slug"].includes(action)) return workspaceOwnerAction(context, uid, body);
   if (action === "begin") {
     assertOnlyKeys(body, ["action", "expectedRevision", "manifest"]);
     const manifest = assertManifest(body.manifest);
-    const lookupPath = rootPath(uid, manifest.rootFolderId);
-    return transactionally(context, [lookupPath], async ([lookup], transaction) => {
-      const wikiId = lookup ? identifier(lookup.wikiId) : `pw1_${randomToken(24)}`;
+    const lookupPath = manifest.rootFolderId === null ? ownerPath(uid) : rootPath(uid, manifest.rootFolderId);
+    return transactionally(context, [...new Set([lookupPath, ownerPath(uid), `users/${uid}`])], async (documents, transaction) => {
+      const lookup = documents[0]; const workspaceLookup = documents[lookupPath === ownerPath(uid) ? 0 : 1];
+      const profile = documents.at(-1); if (!profileActive(profile)) throw notFound();
+      // Legacy snapshots remain updateable, but a new folder never creates another wiki.
+      const target = workspaceLookup ?? lookup;
+      if (!target) throw new HttpError(409, "slug_required");
+      const wikiId = identifier(target.wikiId);
       const [prior] = await firestoreBatchGet(context, [wikiPath(wikiId)], transaction);
-      if (prior) storedSite(prior, wikiId, uid);
+      if (!prior) throw notFound();
+      storedSite(prior, wikiId, uid);
       if ((prior?.revision ?? 0) !== integer(body.expectedRevision)) throw new HttpError(409, "publication_changed");
-      const site = { schemaVersion: 1, wikiId, ownerUid: uid, rootFolderId: manifest.rootFolderId,
+      const site = { schemaVersion: prior?.schemaVersion ?? 2, ...(prior?.slug ? { slug: prior.slug } : {}), wikiId, ownerUid: uid, rootFolderId: prior ? prior.rootFolderId : manifest.rootFolderId,
         revision: prior?.revision ?? 0, published: prior?.published === true, active: prior?.active ?? null,
         updatedAt: prior?.updatedAt ?? null, pending: null };
       await validateSources(context, site, manifest, transaction, true);
@@ -240,19 +361,18 @@ async function ownerAction(context, uid, body) {
       const generation = `pwg1_${randomToken(24)}`;
       site.pending = { ...manifest, generation, deadline: new Date(Date.now() + stageLifetimeMilliseconds).toISOString(), uploaded: {}, totalBytes: 0 };
       site.cleanupAt = cleanupDue(site);
-      return { writes: [...obsolete, ...(!lookup ? [createDocumentWrite(context.projectId, lookupPath, { ownerUid: uid, rootFolderId: manifest.rootFolderId, wikiId })] : []),
-        writeSite(context, wikiId, prior, site)], value: { wikiId, generation, expectedRevision: site.revision } };
+      return { writes: [...obsolete, writeSite(context, wikiId, prior, site)], value: { wikiId, generation, expectedRevision: site.revision } };
     });
   }
   if (action === "status" || action === "unpublish") {
     assertOnlyKeys(body, action === "status" ? ["action", "rootFolderId"] : ["action", "rootFolderId", "expectedRevision"]);
-    const rootFolderId = assertVaultFolderId(body.rootFolderId);
-    const lookup = await firestoreGet(context, rootPath(uid, rootFolderId));
+    const rootFolderId = body.rootFolderId === null ? null : assertVaultFolderId(body.rootFolderId);
+    const lookup = await firestoreGet(context, rootFolderId === null ? ownerPath(uid) : rootPath(uid, rootFolderId));
     if (!lookup) return ownerStatus(null);
     const wikiId = identifier(lookup.wikiId);
     return transactionally(context, [wikiPath(wikiId), `users/${uid}`], async ([document, profile], transaction) => {
       const site = storedSite(document, wikiId, uid);
-      if (!profileActive(profile) || site.rootFolderId !== rootFolderId) throw notFound();
+      if (!profileActive(profile) || (rootFolderId !== null && site.rootFolderId !== rootFolderId)) throw notFound();
       if (action === "status") return { value: ownerStatus(site) };
       if (site.revision !== integer(body.expectedRevision)) throw new HttpError(409, "publication_changed");
       // Revocation becomes authoritative before any best-effort storage cleanup.
@@ -313,9 +433,10 @@ async function ownerAction(context, uid, body) {
 }
 
 function publicProjection(site, allowed) {
-  const root = allowed.folders.find((folder) => folder.sourceFolderId === site.rootFolderId);
-  if (!root) throw notFound();
-  const paths = new Map([[site.rootFolderId, root.name]]);
+  const rootId = site.active.rootFolderId;
+  const root = allowed.folders.find((folder) => folder.sourceFolderId === rootId);
+  if (rootId !== null && !root) throw notFound();
+  const paths = new Map([[null, ""], ...(root ? [[rootId, root.name]] : [])]);
   const byId = new Map(allowed.folders.map((folder) => [folder.sourceFolderId, folder]));
   const pathFor = (id, seen = new Set()) => {
     if (paths.has(id)) return paths.get(id);
@@ -327,29 +448,35 @@ function publicProjection(site, allowed) {
     paths.set(id, path); return path;
   };
   const folders = allowed.folders.map((folder) => ({ id: folderId(site.wikiId, folder.sourceFolderId),
-    parentId: folder.sourceFolderId === site.rootFolderId ? null : folderId(site.wikiId, folder.parentSourceFolderId),
+    parentId: folder.parentSourceFolderId === null ? null : folderId(site.wikiId, folder.parentSourceFolderId),
     name: folder.name, path: pathFor(folder.sourceFolderId) }));
   const entries = allowed.entries.map((entry) => {
-    const directory = pathFor(entry.sourceFolderId);
+    const parentId = rootId === null ? entry.parentSourceFolderId : entry.sourceFolderId;
+    const directory = pathFor(parentId);
     const name = entry.kind === "asset" || /\.md$/iu.test(entry.title) ? entry.title : `${entry.title}.md`;
-    return { id: entryId(site.wikiId, entry.sourceNoteId), folderId: folderId(site.wikiId, entry.sourceFolderId), title: entry.title,
+    return { id: entryId(site.wikiId, entry.sourceNoteId), folderId: parentId === null ? null : folderId(site.wikiId, parentId), title: entry.title,
       path: directory ? `${directory}/${name}` : name, kind: entry.kind };
   });
-  return { wikiId: site.wikiId, revision: site.revision, title: site.active.title, expiresAt: site.active.expiresAt,
+  return { wikiId: site.wikiId, slug: site.slug ?? null, revision: site.revision, title: site.active.title, expiresAt: site.active.expiresAt,
     updatedAt: site.updatedAt, folders, entries };
 }
 
-async function publicAction(context, action, wikiId, ids, revision) {
-  return transactionally(context, [wikiPath(wikiId)], async ([site], transaction) => {
-    if (!site || site.schemaVersion !== 1 || site.wikiId !== wikiId || !site.published || !site.active
+async function publicAction(context, action, requestedId, ids, revision) {
+  const slug = idPattern.test(requestedId) ? null : normalizeSlug(requestedId);
+  return transactionally(context, [slug ? slugPath(slug) : wikiPath(requestedId)], async ([first], transaction) => {
+    if (slug && (!first?.active || !idPattern.test(first.wikiId))) throw notFound();
+    const wikiId = slug ? first.wikiId : requestedId;
+    const site = slug ? (await firestoreBatchGet(context, [wikiPath(wikiId)], transaction))[0] : first;
+    if (slug && (site?.slug !== slug || site?.ownerUid !== first.ownerUid)) throw notFound();
+    if (!site || ![1, 2].includes(site.schemaVersion) || site.wikiId !== wikiId || !site.published || !site.active
       || (site.active.expiresAt !== null && !(Date.parse(site.active.expiresAt) > Date.now()))) throw notFound();
     if (revision !== null && site.revision !== revision) throw new HttpError(409, "publication_changed");
     const requested = action === "manifest" ? site.active.entries : site.active.entries.filter((entry) => ids.includes(entryId(wikiId, entry.sourceNoteId)));
     if (action !== "manifest" && (requested.length !== ids.length || requested.some((entry) => action === "asset" ? entry.kind !== "asset" : entry.kind === "asset"))) throw notFound();
-    const folderIds = new Set([site.rootFolderId]);
+    const folderIds = new Set([site.active.rootFolderId]);
     const folderById = new Map(site.active.folders.map((folder) => [folder.sourceFolderId, folder]));
     for (const entry of requested) {
-      let id = entry.sourceFolderId;
+      let id = site.active.rootFolderId === null ? entry.parentSourceFolderId : entry.sourceFolderId;
       for (let depth = 0; id && depth <= 32; depth += 1) { folderIds.add(id); id = folderById.get(id)?.parentSourceFolderId; }
     }
     const folders = action === "manifest" ? site.active.folders : site.active.folders.filter((folder) => folderIds.has(folder.sourceFolderId));
@@ -446,10 +573,11 @@ export default async function handler(request, response) {
       return;
     }
     const url = requestUrl(request);
-    if ([...url.searchParams.keys()].some((key) => !["action", "wikiId", "ids", "revision"].includes(key))) throw new HttpError(400, "invalid_request");
+    if ([...url.searchParams.keys()].some((key) => !["action", "wikiId", "slug", "ids", "revision"].includes(key))) throw new HttpError(400, "invalid_request");
     const action = url.searchParams.get("action");
     if (!["manifest", "content", "asset"].includes(action)) throw new HttpError(400, "invalid_action");
-    const wikiId = identifier(url.searchParams.get("wikiId"));
+    if (url.searchParams.has("wikiId") === url.searchParams.has("slug")) throw new HttpError(400, "invalid_request");
+    const wikiId = url.searchParams.has("slug") ? normalizeSlug(url.searchParams.get("slug")) : identifier(url.searchParams.get("wikiId"));
     const ids = action === "manifest" ? [] : (url.searchParams.get("ids") ?? "").split(",");
     if (action !== "manifest" && (!ids.length || ids.length > (action === "asset" ? 1 : limits.contentPageSize)
       || ids.some((value) => !/^e_[0-9a-f]{32}$/u.test(value)) || new Set(ids).size !== ids.length)) throw new HttpError(400, "invalid_request");
@@ -462,4 +590,4 @@ export default async function handler(request, response) {
 }
 
 export const __publishedWikiTesting = Object.freeze({ limits, assertManifest, sourceKind, sourceActive, subtreeContains,
-  profileActive, entryId, folderId, rootPath, publicProjection, ownerAction, publicAction, consumeLimit });
+  profileActive, entryId, folderId, rootPath, ownerPath, slugPath, normalizeSlug, publicProjection, ownerAction, publicAction, consumeLimit });

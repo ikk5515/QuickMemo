@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource } from "./vault-editor-helpers.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors,
   expectCleanRuntime,
@@ -262,12 +263,12 @@ test("an authenticated Library item is source-preserved when promoted into encry
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(title, {
       timeout: 35_000
     });
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+    await expect(page.getByRole("button", { name: "소스 모드", exact: true })).toHaveCount(0);
     const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
     await expect(editor).toBeVisible();
-    await expect.poll(async () => (await editor.locator(".cm-line").allTextContents()).join("\n"))
+    await expect.poll(() => readVaultEditorSource(editor))
       .toContain("type: library-clip");
-    const markdown = (await editor.locator(".cm-line").allTextContents()).join("\n");
+    const markdown = await readVaultEditorSource(editor);
     const semanticallyUnescapedMarkdown = markdown.replaceAll("\\_", "_");
     for (const expected of [title, sourceUrl, description, selection, readerBody]) {
       expect(semanticallyUnescapedMarkdown).toContain(expected);

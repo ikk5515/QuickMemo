@@ -3,6 +3,7 @@
 import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource } from "./vault-editor-helpers.mjs";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import {
   expectCleanRuntime,
@@ -154,10 +155,10 @@ test("retired formats remain encrypted, inert, and exportable after the menu cle
 
     if (entry.format === "markdown-v1") {
       await expect(page.locator('section[aria-label="보관된 파일"]')).toHaveCount(0);
-      await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
       const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
       await expect(editor).toBeVisible();
-      await expect.poll(async () => (await editor.locator(".cm-line").allTextContents()).join("\n"))
+      await expect.poll(async () => await readVaultEditorSource(editor))
         .toBe(entry.source);
       await expect(page.locator(".qm-kanban-board")).toHaveCount(0);
       continue;

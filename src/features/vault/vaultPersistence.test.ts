@@ -16,6 +16,7 @@ import { VaultDecryptionSession } from "./vaultDecryptionSession";
 const mocks = vi.hoisted(() => ({
   backfillRevisionedVaultNameClaim: vi.fn(),
   createRevisionedEncryptedNote: vi.fn(),
+  createRevisionedEncryptedNoteAtId: vi.fn(),
   encryptText: vi.fn(),
   fingerprint: vi.fn(),
   generateNoteKey: vi.fn(),
@@ -40,6 +41,7 @@ vi.mock("../../lib/crypto", () => ({
 vi.mock("../../services/notes", () => ({
   backfillRevisionedVaultNameClaim: mocks.backfillRevisionedVaultNameClaim,
   createRevisionedEncryptedNote: mocks.createRevisionedEncryptedNote,
+  createRevisionedEncryptedNoteAtId: mocks.createRevisionedEncryptedNoteAtId,
   migrateLegacyVaultNote: mocks.migrateLegacyVaultNote,
   resolveRevisionedVaultNameCollision: mocks.resolveRevisionedVaultNameCollision,
   updateRevisionedEncryptedNote: mocks.updateRevisionedEncryptedNote,
@@ -127,6 +129,44 @@ describe("vaultPersistence encrypted revision contract", () => {
     mocks.updateRevisionedEncryptedNote.mockResolvedValue({ noteId: "note-a", revision: 8 });
     mocks.updateRevisionedEncryptedNoteAndFolder.mockResolvedValue({ noteId: "note-a", revision: 8 });
     mocks.updateRevisionedNoteFolder.mockResolvedValue({ noteId: "note-a", revision: 8 });
+  });
+
+  it("does not start crypto for an already-cancelled asset creation", async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(createEncryptedVaultAsset(profile, vaultIntegrityKey, {
+      title: "asset.png", folderId: null, bytes: new Uint8Array([1]), mimeType: "application/octet-stream"
+    }, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    expect(mocks.generateNoteKey).not.toHaveBeenCalled(); expect(mocks.createRevisionedEncryptedNote).not.toHaveBeenCalled();
+  });
+
+  it.each(["keygen", "encrypt", "session"])("prevents a create dispatch after cancellation during %s", async (phase) => {
+    const gate = deferred<CryptoKey | typeof encryptedPayload>();
+    const controller = new AbortController();
+    const session = new VaultDecryptionSession(profile.uid, privateKey);
+    const captured = session.signal;
+    if (phase === "keygen") mocks.generateNoteKey.mockReturnValue(gate.promise);
+    else mocks.encryptText.mockReturnValue(gate.promise);
+    const pending = createEncryptedVaultEntry(profile, vaultIntegrityKey, {
+      title: "safe", body: "private", folderId: null, contentFormat: "markdown-v1", entryKind: "markdown"
+    }, { signal: controller.signal, assertCurrent: () => { captured.throwIfAborted(); session.assertSession(profile.uid, privateKey); } });
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(phase === "keygen" ? mocks.generateNoteKey : mocks.encryptText).toHaveBeenCalled());
+    if (phase === "session") session.clear(); else controller.abort();
+    gate.resolve(phase === "keygen" ? noteKey : encryptedPayload);
+    await rejected;
+    expect(mocks.createRevisionedEncryptedNote).not.toHaveBeenCalled();
+    if (phase === "keygen") expect(mocks.encryptText).not.toHaveBeenCalled();
+  });
+
+  it("forwards a live pre-dispatch guard through preallocated import creation", async () => {
+    const controller = new AbortController();
+    mocks.createRevisionedEncryptedNoteAtId.mockResolvedValue({ noteId: "reserved", revision: 1 });
+    await createEncryptedVaultEntry(profile, vaultIntegrityKey, {
+      title: "safe", body: "private", folderId: null, contentFormat: "markdown-v1", entryKind: "markdown"
+    }, { targetId: "reserved", importJobId: "vi1_opaque", signal: controller.signal });
+    const guard = mocks.createRevisionedEncryptedNoteAtId.mock.calls[0][3];
+    expect(guard).toBeTypeOf("function"); expect(() => guard()).not.toThrow();
+    controller.abort(); expect(() => guard()).toThrow();
   });
 
   it("keeps original Markdown unchanged and stores only encrypted title, body and history payloads", async () => {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildKnowledgeIndex } from "../knowledge/knowledgeIndex";
 import { matchesVaultSearchQuery } from "../knowledge/query";
 import type { GraphSnapshot, VaultIndexEntry } from "../knowledge/types";
-import { appendWikiPanel, wikiEntries, wikiFolderPaths, wikiGraphData, wikiLiteralSearchQuery, wikiOutline, wikiPanelIds, wikiSearchQuery, wikiTreeRows, WIKI_GRAPH_NODE_LIMIT } from "./wikiModel";
+import { WikiEntriesProjection, wikiEntries, wikiFolderPaths, wikiGraphData, wikiLiteralSearchQuery, wikiOutline, wikiSearchQuery, wikiTreeRows, WIKI_GRAPH_NODE_LIMIT } from "./wikiModel";
 
 describe("private wiki projection", () => {
   const entries: VaultIndexEntry[] = [
@@ -50,14 +50,18 @@ describe("private wiki projection", () => {
     expect(wikiFolderPaths([{ id: "a", displayName: "A", parentId: "b" }, { id: "b", displayName: "B", parentId: "a" }]).size).toBe(2);
   });
 
-  it("bounds stacked panels to six and never accepts unprovided ids from the URL", () => {
-    const allowed = new Set(["a", "b", "c", "d", "e", "f", "g"]);
-    expect(wikiPanelIds("a", ["b", "c", "d", "e", "f", "g"], allowed)).toEqual(["a", "b", "c", "d", "e", "f"]);
-    expect(wikiPanelIds("a", ["b", "foreign", "c"], allowed)).toEqual(["a", "b"]);
-    expect(wikiPanelIds("foreign", ["a"], allowed)).toEqual([]);
-    expect(appendWikiPanel(["a", "b", "c"], "a", "d")).toEqual(["a", "d"]);
-    expect(appendWikiPanel(["a", "b", "c"], "c", "a")).toEqual(["a"]);
-    expect(appendWikiPanel(["a", "b", "c", "d", "e", "f"], "f", "g")).toEqual(["a", "b", "c", "d", "e", "g"]);
+  it("keeps empty authorized folders visible and unchanged projected entries stable", () => {
+    const folders = [{ id: "empty", parentId: null, displayName: "빈 폴더" }];
+    expect(wikiTreeRows([], new Set(), folders)).toEqual([{ kind: "folder", id: "빈 폴더", title: "빈 폴더", depth: 0, count: 0 }]);
+    const projection = new WikiEntriesProjection();
+    const source = ["a", "b"].map((id) => ({ id, title: id, body: id, entryKind: "markdown" as const, contentFormat: "markdown-v1" as const }));
+    const first = projection.project(source, folders);
+    expect(projection.project(source.map((note) => ({ ...note })), folders)).toBe(first);
+    const updated = projection.project([{ ...source[0], body: "changed" }, source[1]], folders);
+    expect(updated[0]).not.toBe(first[0]); expect(updated[1]).toBe(first[1]);
+    expect(projection.project([source[1]], folders).map((entry) => entry.id)).toEqual(["b"]);
+    projection.clear();
+    expect(projection.project([source[1]], folders)[0]).not.toBe(first[1]);
   });
 
   it("keeps heading hierarchy across skipped levels without inventing empty parents", () => {

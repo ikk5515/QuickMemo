@@ -31,27 +31,22 @@ describe("Vault tablet sidebar layout contract", () => {
     ]));
   });
 
-  it("places the tablet title and mode controls in separate grid areas", () => {
-    const headerStart = styles.indexOf("@media (min-width: 761px) and (max-width: 1180px) {");
-    const touchStart = styles.indexOf("@media (max-width: 1024px), (pointer: coarse) {", headerStart);
-    const headerStyles = styles.slice(headerStart, touchStart);
-
-    expect(headerStart).toBeGreaterThanOrEqual(0);
-    expect(touchStart).toBeGreaterThan(headerStart);
-    expect(ruleBodiesForSelector(headerStyles, ".vault-note-header")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-template-areas:\s*"breadcrumb title"\s*"actions actions";/u),
-      expect.stringMatching(/grid-template-columns:\s*minmax\(70px, \.75fr\) minmax\(0, 1\.25fr\);/u),
-      expect.stringMatching(/grid-template-rows:\s*minmax\(30px, auto\) minmax\(44px, auto\);/u)
+  it("keeps a compact title and menu header with flexible editor height at every width", () => {
+    expect(ruleBodiesForSelector(styles, ".vault-note-header")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/grid-template-areas:\s*"breadcrumb actions"\s*"title actions";/u),
+      expect.stringMatching(/grid-template-columns:\s*minmax\(0, 1fr\) auto;/u),
+      expect.stringMatching(/flex:\s*0 0 auto;/u)
     ]));
-    expect(ruleBodiesForSelector(headerStyles, ".vault-note-header > input")).toEqual(expect.arrayContaining([
+    expect(ruleBodiesForSelector(styles, ".vault-note-header > input")).toEqual(expect.arrayContaining([
       expect.stringMatching(/grid-area:\s*title;[\s\S]*width:\s*100%;/u)
     ]));
-    expect(ruleBodiesForSelector(headerStyles, ".vault-note-actions")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/grid-area:\s*actions;[\s\S]*justify-content:\s*flex-start;[\s\S]*width:\s*100%;/u)
+    expect(ruleBodiesForSelector(styles, ".vault-note-actions")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/grid-area:\s*actions;/u)
     ]));
-    expect(ruleBodiesForSelector(headerStyles, ".vault-note-content")).toEqual(expect.arrayContaining([
-      expect.stringMatching(/height:\s*calc\(100% - 98px\);/u)
+    expect(ruleBodiesForSelector(styles, ".vault-note-content")).toEqual(expect.arrayContaining([
+      expect.stringMatching(/flex:\s*1 1 auto;/u)
     ]));
+    expect(styles).not.toContain("height: calc(100% - 98px)");
   });
 
   it("reserves a 280px editor before growing the portrait-tablet left sidebar", () => {

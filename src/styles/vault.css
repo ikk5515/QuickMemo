@@ -72,6 +72,44 @@
   grid-template-columns: var(--vault-rail-size) minmax(0, 1fr);
 }
 
+.vault-workspace.vault-workspace--wiki {
+  display: block;
+  position: relative;
+}
+
+.vault-workspace--wiki > .private-wiki {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.vault-workspace--wiki .wiki-layout {
+  height: calc(100% - var(--wiki-header-height));
+}
+
+.wiki-document-editor {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.wiki-document-editor > .vault-codemirror {
+  flex: 1 1 auto;
+}
+
+.wiki-save-state {
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .vault-workspace button,
 .vault-workspace input,
 .vault-workspace select {
@@ -175,6 +213,7 @@
   color: var(--muted);
   display: inline-flex;
   height: 32px;
+  min-height: 32px;
   justify-content: center;
   padding: 0;
   width: 32px;
@@ -835,6 +874,7 @@
   font-size: 13px;
   gap: 5px;
   height: 28px;
+  min-height: 28px;
   max-width: 100%;
   padding-block: 0;
   padding-inline-end: 7px;
@@ -1293,6 +1333,8 @@
 }
 
 .vault-editor-pane {
+  display: flex;
+  flex-direction: column;
   background: var(--vault-panel);
   min-height: 0;
   min-width: 0;
@@ -1385,13 +1427,17 @@
   background: var(--vault-panel);
   border-bottom: 1px solid var(--vault-border);
   display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(80px, 1fr) minmax(170px, 2fr) minmax(0, auto);
-  min-height: 57px;
-  padding: 5px 13px;
+  grid-template-areas: "breadcrumb actions" "title actions";
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  flex: 0 0 auto;
+  gap: 0 8px;
+  min-height: 50px;
+  padding: 4px 12px;
 }
 
 .vault-breadcrumb {
+  grid-area: breadcrumb;
   color: var(--muted);
   font-size: 11px;
   min-width: 0;
@@ -1401,18 +1447,21 @@
 }
 
 .vault-note-header > input {
+  grid-area: title;
   background: transparent;
   border: 0;
   border-radius: 4px;
   color: var(--ink);
-  font-size: 18px;
-  font-weight: 650;
+  font-size: 17px;
+  font-weight: 600;
   min-width: 0;
-  padding: 5px 7px;
-  text-align: center;
+  width: 100%;
+  padding: 2px 0;
+  text-align: start;
 }
 
 .vault-note-actions {
+  grid-area: actions;
   align-items: center;
   display: flex;
   gap: 3px;
@@ -1448,6 +1497,7 @@
 }
 
 .vault-save-conflict {
+  flex: 0 0 auto;
   align-items: center;
   background: color-mix(in srgb, #d79921 13%, var(--vault-panel));
   border-bottom: 1px solid color-mix(in srgb, #d79921 55%, var(--vault-border));
@@ -1487,12 +1537,8 @@
   padding: 5px 8px;
 }
 
-.vault-save-conflict + .vault-note-content {
-  height: calc(100% - 129px);
-}
-
 .vault-note-content {
-  height: calc(100% - 57px);
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
 }
@@ -1775,8 +1821,8 @@
   flex-wrap: wrap;
   gap: 7px;
   justify-content: flex-end;
-  min-height: 34px;
-  padding: 4px 9px;
+  min-height: 28px;
+  padding: 2px 8px;
 }
 
 .vault-codemirror-image-tools button {
@@ -2415,43 +2461,6 @@
   }
 }
 
-@media (min-width: 761px) and (max-width: 1180px) {
-  .vault-note-header {
-    gap: 5px 8px;
-    grid-template-areas:
-      "breadcrumb title"
-      "actions actions";
-    grid-template-columns: minmax(70px, .75fr) minmax(0, 1.25fr);
-    grid-template-rows: minmax(30px, auto) minmax(44px, auto);
-    min-height: 98px;
-    padding-block: 5px;
-  }
-
-  .vault-breadcrumb {
-    grid-area: breadcrumb;
-  }
-
-  .vault-note-header > input {
-    grid-area: title;
-    text-align: start;
-    width: 100%;
-  }
-
-  .vault-note-actions {
-    grid-area: actions;
-    justify-content: flex-start;
-    width: 100%;
-  }
-
-  .vault-note-content {
-    height: calc(100% - 98px);
-  }
-
-  .vault-save-conflict + .vault-note-content {
-    height: calc(100% - 170px);
-  }
-}
-
 @media (min-width: 761px) and (max-width: 900px) {
   .vault-workspace {
     grid-template-columns: var(--vault-rail-size) minmax(150px, 170px) minmax(280px, 1fr) var(--vault-right-panel-size);
@@ -2515,7 +2524,6 @@
   .vault-left-panel header > button,
   .vault-right-panel > header > button,
   .vault-note-actions button,
-  .vault-note-actions select,
   .vault-codemirror-image-tools button,
   .vault-context-menu button,
   .vault-move-dialog button,
@@ -2622,6 +2630,7 @@
   .vault-tree-row {
     contain-intrinsic-size: auto 44px;
     height: 44px;
+    min-height: 44px;
   }
 
   .vault-center {
@@ -2822,28 +2831,6 @@
     min-width: 132px;
   }
 
-  .vault-note-header {
-    gap: 3px 6px;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: auto auto;
-    min-height: 76px;
-    padding: 5px 8px;
-  }
-
-  .vault-breadcrumb {
-    grid-column: 1 / -1;
-  }
-
-  .vault-note-header > input {
-    font-size: 16px;
-    padding-inline: 3px;
-    text-align: start;
-  }
-
-  .vault-note-content {
-    height: calc(100% - 76px);
-  }
-
   .vault-note-attachments-inline {
     gap: 6px;
     min-height: 52px;
@@ -2876,18 +2863,6 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .vault-save-conflict + .vault-note-content {
-    height: calc(100% - 202px);
-  }
-
-  .vault-note-actions button:not(:last-child) {
-    padding-inline: 5px;
-  }
-
-  .vault-note-actions select {
-    max-width: 70px;
-  }
-
   .vault-right-panel {
     bottom: 0;
     box-shadow: -10px 0 28px rgb(0 0 0 / 16%);
@@ -2907,25 +2882,6 @@
 }
 
 @media (max-width: 390px) {
-  .vault-note-header {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto;
-    min-height: 156px;
-  }
-
-  .vault-note-header > input,
-  .vault-note-actions {
-    grid-column: 1;
-    width: 100%;
-  }
-
-  .vault-note-actions {
-    display: grid;
-    gap: 3px;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    justify-content: flex-start;
-    overflow: visible;
-  }
 
   .vault-note-attachments-inline-label strong {
     display: none;
@@ -2937,26 +2893,6 @@
     text-overflow: ellipsis;
   }
 
-  .vault-note-content {
-    height: calc(100% - 156px);
-  }
-
-  .vault-save-conflict + .vault-note-content {
-    height: calc(100% - 282px);
-  }
-
-  .vault-note-actions select {
-    flex: 0 0 auto;
-    max-width: none;
-  }
-
-  .vault-note-actions button,
-  .vault-note-actions select {
-    box-sizing: border-box;
-    font-size: 10px;
-    min-width: 0;
-    width: 100%;
-  }
 }
 
 .vault-message-batch-backdrop {
@@ -3446,4 +3382,59 @@
     max-height: 88dvh;
     border-radius: 14px 14px 0 0;
   }
+}
+
+.vault-wiki-inspector-backdrop { position: absolute; inset: 0; background: #0004; border: 0; z-index: 40; }
+.vault-workspace--wiki > .vault-wiki-inspector { position: absolute; inset: 0 0 0 auto; z-index: 41; width: min(360px, 100%); max-width: 100%; box-shadow: -8px 0 24px #0002; }
+/* A retained desktop tree permits a continuous collapse and keeps tree scroll intact. */
+@media (min-width: 761px) {
+  .vault-workspace:not(.vault-workspace--wiki) {
+    --vault-left-panel-size: var(--vault-left-panel-width, 244px);
+    grid-template-columns: var(--vault-rail-size) var(--vault-left-panel-size) minmax(0, 1fr) var(--vault-right-panel-size);
+    transition: grid-template-columns 180ms ease;
+  }
+  .vault-workspace.vault-left-closed { --vault-left-panel-size: 0px; }
+  .vault-workspace.vault-right-closed { --vault-right-panel-size: 0px; }
+  /* Keep a grabbed or keyboard-controlled divider at its current target. */
+  .vault-workspace:has(.qm-sidebar-resizer[data-resizing="true"]),
+  .vault-workspace:has(.qm-sidebar-resizer:focus),
+  .vault-workspace:has(.vault-right-panel-resizer:active),
+  .vault-workspace:has(.vault-right-panel-resizer:focus) { transition: none; }
+  .vault-left-panel { position: relative; animation: none; min-width: 0; transition: opacity 130ms ease, visibility 180ms; }
+  .vault-left-panel.is-collapsed { opacity: 0; visibility: hidden; overflow: hidden; border: 0; }
+  .vault-left-panel-resizer { inset-inline-end: 0; width: 7px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vault-workspace:not(.vault-workspace--wiki), .vault-left-panel { transition: none; }
+}
+
+@media (max-width: 1199px) {
+  .vault-workspace--wiki .wiki-layout { height: auto; }
+  .vault-workspace--wiki .wiki-panel-stack { height: calc(var(--wiki-available-height, 100dvh) - var(--wiki-header-height)); }
+}
+@media (min-width: 768px) and (max-width: 1199px) {
+  .vault-workspace--wiki .wiki-sidebar { height: calc(var(--wiki-available-height, 100dvh) - var(--wiki-header-height)); }
+}
+
+/* The editable document shares the reading typography; syntax remains visible
+   only at the caret. File actions float in the otherwise empty top corner. */
+.vault-note-content { position: relative; }
+.vault-note-content > .vault-codemirror--live-preview { max-width: none; }
+.vault-codemirror--live-preview { position: relative; }
+.vault-codemirror--live-preview.vault-codemirror--with-image-tools { grid-template-rows: minmax(0, 1fr); }
+.vault-codemirror--live-preview .cm-editor .cm-scroller { font-family: inherit; font-size: 16px; line-height: 1.7; }
+.vault-codemirror--live-preview .cm-editor .cm-content { width: 100%; max-width: 860px; margin-inline: auto; padding: 38px 30px 80px; }
+.vault-codemirror--live-preview .vault-codemirror-editor > .cm-editor .cm-gutters { background: transparent; border: 0; }
+.vault-codemirror--live-preview .cm-line.cm-live-heading, .vault-codemirror--live-preview .cm-line.cm-live-heading span { text-decoration: none; }
+.vault-codemirror--live-preview .cm-live-code-line { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; line-height: 1.6; }
+.vault-codemirror--live-preview > .vault-codemirror-image-tools { position: absolute; top: 3px; right: 8px; z-index: 3; background: transparent; border: 0; padding: 0; }
+.vault-codemirror-image-tools button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-height: 30px; padding: 0; background: transparent; border-color: transparent; }
+.vault-codemirror-image-tools .vault-image-limit-description { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.vault-note-content:has(> .vault-note-attachments-inline.is-empty) { display: block; }
+.vault-note-attachments-inline.is-empty { position: absolute; inset: 3px 45px auto auto; z-index: 4; display: block; min-height: 0; padding: 0; background: transparent; border: 0; }
+.vault-note-attachments-inline.is-empty button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; min-height: 30px; padding: 0; border-color: transparent; background: transparent; }
+@media (max-width: 760px), (pointer: coarse) {
+  .vault-codemirror-image-tools button, .vault-note-attachments-inline.is-empty button { width: 44px; height: 44px; min-height: 44px; }
+  .vault-note-attachments-inline.is-empty { right: 56px; }
+  .vault-codemirror--live-preview .cm-editor .cm-content { padding: 50px 18px 70px; }
 }

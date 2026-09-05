@@ -1,9 +1,9 @@
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyField, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { Annotation, Compartment, EditorSelection, EditorState } from "@codemirror/state";
-import { searchKeymap } from "@codemirror/search";
+import { openSearchPanel, searchKeymap } from "@codemirror/search";
 import {
   crosshairCursor,
   drawSelection,
@@ -16,7 +16,10 @@ import {
   lineNumbers,
   rectangularSelection
 } from "@codemirror/view";
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ImagePlus } from "lucide-react";
+import type { MarkdownEditorSessionStore } from "./markdownEditorSession";
+import type { LivePreviewUpdates } from "./livePreviewUpdates";
 import type {
   MarkdownLinkPreviewHandler,
   MarkdownLinkReference,
@@ -24,6 +27,7 @@ import type {
   MarkdownTagClickHandler
 } from "../markdown";
 import { constructWithFrameDeferredResizeObserver } from "./frameDeferredResizeObserver";
+import { afterCompositionDomSync } from "./afterCompositionDomSync";
 import {
   inlineLivePreview,
   LIVE_PREVIEW_LINK_OPEN_EVENT,
@@ -143,7 +147,13 @@ export interface CodeMirrorMarkdownEditorProps {
   documentKey?: string;
   insertRequest?: { cursorOffset?: number; id: number; text: string } | null;
   livePreview?: boolean;
+  previewUpdates?: LivePreviewUpdates;
   onChange: (value: string) => void;
+  onCompositionChange?: (composing: boolean) => void;
+  sessionStore?: MarkdownEditorSessionStore;
+  sessionScopeKey?: string;
+  searchRequest?: { id: number } | null;
+  onSearchHandled?: (id: number) => void;
   onInsertHandled?: (id: number) => void;
   onLinkClick?: CodeMirrorLinkClickHandler;
   onLinkPreviewInteraction?: MarkdownLinkPreviewHandler;
@@ -168,7 +178,13 @@ export function CodeMirrorMarkdownEditor({
   documentKey,
   insertRequest,
   livePreview = false,
+  previewUpdates,
   onChange,
+  onCompositionChange,
+  sessionStore,
+  sessionScopeKey,
+  searchRequest,
+  onSearchHandled,
   onInsertHandled,
   onLinkClick,
   onLinkPreviewInteraction,
@@ -187,6 +203,11 @@ export function CodeMirrorMarkdownEditor({
   const hostRef = useRef<HTMLDivElement>(null);
   const completionDataRef = useRef(completionData);
   const onChangeRef = useRef(onChange);
+  const onCompositionChangeRef = useRef(onCompositionChange);
+  const composingRef = useRef(false);
+  const composedValueRef = useRef<string | null>(null);
+  const saveAfterCompositionRef = useRef(false);
+  const [compositionVersion, setCompositionVersion] = useState(0);
   const onInsertHandledRef = useRef(onInsertHandled);
   const onLinkClickRef = useRef(onLinkClick);
   const onLinkPreviewInteractionRef = useRef(onLinkPreviewInteraction);
@@ -213,12 +234,14 @@ export function CodeMirrorMarkdownEditor({
   const imagePickerTargetViewRef = useRef<EditorView | null>(null);
   const queueSelectedImagesRef = useRef<(files: readonly File[]) => void>(() => undefined);
   const livePreviewCompartmentRef = useRef(new Compartment());
+  const lineNumberCompartmentRef = useRef(new Compartment());
   const readOnlyCompartmentRef = useRef(new Compartment());
   const viewRef = useRef<EditorView | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     completionDataRef.current = completionData;
     onChangeRef.current = onChange;
+    onCompositionChangeRef.current = onCompositionChange;
     onInsertHandledRef.current = onInsertHandled;
     onLinkClickRef.current = onLinkClick;
     onLinkPreviewInteractionRef.current = onLinkPreviewInteraction;
@@ -229,9 +252,10 @@ export function CodeMirrorMarkdownEditor({
     onTagClickRef.current = onTagClick;
     renderCodeBlockRef.current = renderCodeBlock;
     renderEmbedRef.current = renderEmbed;
-  }, [completionData, onChange, onInsertHandled, onLinkClick, onLinkPreviewInteraction, onPasteImages, onRevealHandled, onSave, onSelectionChange, onTagClick, renderCodeBlock, renderEmbed]);
+  }, [completionData, onChange, onCompositionChange, onInsertHandled, onLinkClick, onLinkPreviewInteraction, onPasteImages, onRevealHandled, onSave, onSelectionChange, onTagClick, renderCodeBlock, renderEmbed]);
 
-  const createLivePreviewExtension = () => inlineLivePreview({
+  const createLivePreviewExtension = useCallback(() => inlineLivePreview({
+    updates: previewUpdates,
     onLinkClick: (reference, event) => onLinkClickRef.current?.(reference, event),
     onLinkPreviewInteraction: (reference, interaction) => (
       onLinkPreviewInteractionRef.current?.(reference, interaction)
@@ -239,14 +263,23 @@ export function CodeMirrorMarkdownEditor({
     onTagClick: (tag, event) => onTagClickRef.current?.(tag, event),
     renderCodeBlock: (language, source) => renderCodeBlockRef.current?.(language, source),
     renderEmbed: (reference) => renderEmbedRef.current?.(reference)
-  });
+  }), [previewUpdates]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const parent = hostRef.current;
     if (!parent) {
       return undefined;
     }
 
+    const sessionGeneration = sessionStore?.generation;
+    const storedSession = documentKey && sessionScopeKey
+      ? sessionStore?.read(sessionScopeKey, documentKey, value)
+      : null;
+    const sessionIsCurrent = () => !sessionStore || sessionStore.generation === sessionGeneration;
+    let cancelCompositionFinish: (() => void) | null = null;
+    composingRef.current = false;
+    composedValueRef.current = null;
+    saveAfterCompositionRef.current = false;
     const pendingImagePasteRanges = pendingImagePasteRangesRef.current;
     acceptedControlledValueRef.current = value;
     controlledValueRevisionRef.current = valueRevision;
@@ -363,13 +396,9 @@ export function CodeMirrorMarkdownEditor({
       return true;
     };
 
-    const view = constructWithFrameDeferredResizeObserver(window, () => new EditorView({
-      parent,
-      state: EditorState.create({
-        doc: value,
-        extensions: [
-          lineNumbers(),
-          highlightActiveLineGutter(),
+    let activatedLinkOnMouseDown: HTMLElement | null = null;
+    const extensions = [
+          lineNumberCompartmentRef.current.of(livePreview ? [] : [lineNumbers(), highlightActiveLineGutter()]),
           highlightSpecialChars(),
           history(),
           foldGutter(),
@@ -400,6 +429,31 @@ export function CodeMirrorMarkdownEditor({
             "aria-keyshortcuts": "Control+Space"
           }),
           EditorView.domEventHandlers({
+            compositionstart: () => {
+              cancelCompositionFinish?.();
+              cancelCompositionFinish = null;
+              composingRef.current = true;
+              onCompositionChangeRef.current?.(true);
+              return false;
+            },
+            compositionend: (_event, editorView) => {
+              cancelCompositionFinish?.();
+              cancelCompositionFinish = afterCompositionDomSync(editorView, () => {
+                if (viewRef.current !== editorView || !sessionIsCurrent()) return;
+                composingRef.current = false;
+                if (composedValueRef.current !== null) {
+                  composedValueRef.current = null;
+                  onChangeRef.current(editorView.state.doc.toString());
+                }
+                onCompositionChangeRef.current?.(false);
+                setCompositionVersion((version) => version + 1);
+                if (saveAfterCompositionRef.current) {
+                  saveAfterCompositionRef.current = false;
+                  onSaveRef.current?.();
+                }
+              });
+              return false;
+            },
             mouseover: (event, editorView) => {
               const anchor = livePreviewAnchorFromEvent(event, editorView);
               const reference = livePreviewReferenceFromElement(anchor);
@@ -428,8 +482,29 @@ export function CodeMirrorMarkdownEditor({
               onLinkPreviewInteractionRef.current?.(reference, { active: false, anchor, source: "focus" });
               return false;
             },
+            mousedown: (event, editorView) => {
+              activatedLinkOnMouseDown = null;
+              if (event.button !== 0 || (!event.metaKey && !event.ctrlKey) || !onLinkClickRef.current) return false;
+              const anchor = livePreviewAnchorFromEvent(event, editorView);
+              const reference = livePreviewReferenceFromElement(anchor);
+              if (!anchor || !reference || reference.kind === "external") return false;
+              // CM's default mousedown moves the caret into this line and
+              // removes its preview widget before click can inspect it.
+              event.preventDefault();
+              event.stopPropagation();
+              activatedLinkOnMouseDown = anchor;
+              onLinkClickRef.current(reference, event);
+              return true;
+            },
             click: (event, editorView) => {
               const anchor = livePreviewAnchorFromEvent(event, editorView);
+              const alreadyActivated = anchor !== null && anchor === activatedLinkOnMouseDown;
+              activatedLinkOnMouseDown = null;
+              if (alreadyActivated) {
+                event.preventDefault();
+                event.stopPropagation();
+                return true;
+              }
               const reference = livePreviewReferenceFromElement(anchor);
               if (!anchor || !reference || reference.kind === "external" || (!event.metaKey && !event.ctrlKey)) {
                 return false;
@@ -488,7 +563,8 @@ export function CodeMirrorMarkdownEditor({
               key: "Mod-s",
               preventDefault: true,
               run: () => {
-                onSaveRef.current?.();
+                if (composingRef.current) saveAfterCompositionRef.current = true;
+                else onSaveRef.current?.();
                 return true;
               }
             },
@@ -548,7 +624,8 @@ export function CodeMirrorMarkdownEditor({
               if (droppedValue !== null) {
                 appendBoundedValue(ignoredControlledValuesRef.current, droppedValue);
               }
-              onChangeRef.current(nextValue);
+              if (composingRef.current) composedValueRef.current = nextValue;
+              else onChangeRef.current(nextValue);
             }
             if (update.selectionSet || update.docChanged) {
               const selection = update.state.selection.main;
@@ -557,9 +634,19 @@ export function CodeMirrorMarkdownEditor({
                 : { start: selection.from, end: selection.to });
             }
           })
-        ]
-      })
-    }));
+        ];
+    let state: EditorState;
+    if (storedSession) {
+      try {
+        state = EditorState.fromJSON(storedSession.state, { extensions }, { history: historyField });
+      } catch {
+        // A remote edit or incompatible history snapshot starts a clean session.
+        state = EditorState.create({ doc: value, extensions });
+      }
+    } else {
+      state = EditorState.create({ doc: value, extensions });
+    }
+    const view = constructWithFrameDeferredResizeObserver(window, () => new EditorView({ parent, state }));
 
     const handleLivePreviewKeyboardOpen = (event: Event) => {
       if (!(event instanceof CustomEvent)) return;
@@ -579,6 +666,18 @@ export function CodeMirrorMarkdownEditor({
     view.dom.addEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
 
     viewRef.current = view;
+    if (storedSession) {
+      view.scrollDOM.scrollTop = storedSession.scrollTop;
+      view.scrollDOM.scrollLeft = storedSession.scrollLeft;
+      view.requestMeasure({
+        read: () => undefined,
+        write: () => {
+          if (viewRef.current !== view) return;
+          view.scrollDOM.scrollTop = storedSession.scrollTop;
+          view.scrollDOM.scrollLeft = storedSession.scrollLeft;
+        }
+      });
+    }
     queueSelectedImagesRef.current = (files) => {
       if (viewRef.current === view) queueImages(files, view);
     };
@@ -587,6 +686,21 @@ export function CodeMirrorMarkdownEditor({
       ? null
       : { start: initialSelection.from, end: initialSelection.to });
     return () => {
+      cancelCompositionFinish?.();
+      if (sessionIsCurrent()) {
+        if (composedValueRef.current !== null) onChangeRef.current(view.state.doc.toString());
+        if (composingRef.current) onCompositionChangeRef.current?.(false);
+        if (documentKey && sessionScopeKey && sessionGeneration !== undefined) {
+          sessionStore?.write(sessionScopeKey, documentKey, sessionGeneration, {
+            state: view.state.toJSON({ history: historyField }),
+            scrollTop: view.scrollDOM.scrollTop,
+            scrollLeft: view.scrollDOM.scrollLeft
+          });
+        }
+      }
+      composingRef.current = false;
+      composedValueRef.current = null;
+      saveAfterCompositionRef.current = false;
       view.dom.removeEventListener(LIVE_PREVIEW_LINK_OPEN_EVENT, handleLivePreviewKeyboardOpen);
       viewRef.current = null;
       imagePickerTargetViewRef.current = null;
@@ -599,19 +713,18 @@ export function CodeMirrorMarkdownEditor({
       view.destroy();
     };
     // The editor instance must survive callback/value changes for one note,
-    // but a different document gets a fresh undo history.
+    // but another document restores only its own bounded, authorized session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ariaLabel, documentKey]);
+  }, [ariaLabel, documentKey, sessionStore, sessionScopeKey]);
 
   useEffect(() => {
-    // Source/Live Preview changes focus policy for the same document. Keep its
-    // editor, undo history, and pending image range alive while applying focus.
+    // Focus changes never recreate the editor or interrupt a pending paste.
     if (autoFocus) viewRef.current?.focus();
   }, [ariaLabel, autoFocus, documentKey]);
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view) {
+    if (!view || composingRef.current) {
       return;
     }
 
@@ -683,17 +796,18 @@ export function CodeMirrorMarkdownEditor({
       annotations: externalValueSync.of(true),
       changes: { from: 0, to: view.state.doc.length, insert: value }
     });
-  }, [value, valueRevision]);
+  }, [value, valueRevision, compositionVersion]);
 
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: livePreviewCompartmentRef.current.reconfigure(
-        livePreview ? createLivePreviewExtension() : []
-      )
+      effects: [
+        livePreviewCompartmentRef.current.reconfigure(livePreview ? createLivePreviewExtension() : []),
+        lineNumberCompartmentRef.current.reconfigure(livePreview ? [] : [lineNumbers(), highlightActiveLineGutter()])
+      ]
     });
-  }, [livePreview]);
+  }, [livePreview, createLivePreviewExtension]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -712,7 +826,7 @@ export function CodeMirrorMarkdownEditor({
 
   useEffect(() => {
     const view = viewRef.current;
-    if (!view || !insertRequest) {
+    if (!view || !insertRequest || view.state.readOnly || composingRef.current) {
       return;
     }
     const selection = view.state.selection.main;
@@ -727,7 +841,7 @@ export function CodeMirrorMarkdownEditor({
     });
     view.focus();
     onInsertHandledRef.current?.(insertRequest.id);
-  }, [insertRequest]);
+  }, [insertRequest, compositionVersion]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -743,6 +857,13 @@ export function CodeMirrorMarkdownEditor({
     view.focus();
     onRevealHandledRef.current?.(revealRequest.id);
   }, [revealRequest]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !searchRequest || composingRef.current) return;
+    openSearchPanel(view);
+    onSearchHandled?.(searchRequest.id);
+  }, [searchRequest, onSearchHandled, compositionVersion]);
 
   return (
     <div
@@ -777,10 +898,10 @@ export function CodeMirrorMarkdownEditor({
               imagePickerTargetViewRef.current = editorView;
               imageFileInputRef.current?.click();
             }}
-            title="PNG, JPG, WebP 파일 선택"
+            title={`이미지 파일 추가 · ${vaultMarkdownImageLimitLabel}`}
             type="button"
-          >이미지 추가</button>
-          <span>{vaultMarkdownImageLimitLabel}</span>
+          ><ImagePlus aria-hidden="true" size={17} /></button>
+          <span className="vault-image-limit-description">{vaultMarkdownImageLimitLabel}</span>
         </div>
       ) : null}
       <div className="vault-codemirror-editor" ref={hostRef} />

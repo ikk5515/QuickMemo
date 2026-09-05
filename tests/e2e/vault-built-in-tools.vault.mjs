@@ -1,6 +1,7 @@
 /* global document, getComputedStyle */
 
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors,
   expectCleanRuntime,
@@ -43,41 +44,15 @@ async function activeEntryId(page) {
 }
 
 async function expectEditorSource(page, expectedSource) {
-  // Live Preview intentionally hides Markdown emphasis delimiters such as
-  // underscores. Select Source mode before reading CodeMirror's rendered DOM
-  // so this helper verifies the decrypted Markdown bytes, not preview text.
-  const sourceMode = page.getByRole("button", { name: "소스 모드", exact: true });
-  await expect(sourceMode).toBeVisible();
-  if (await sourceMode.getAttribute("aria-pressed") !== "true") {
-    await sourceMode.click();
-  }
-  await expect(sourceMode).toHaveAttribute("aria-pressed", "true");
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await expect(editor).toBeVisible();
   await expect.poll(async () => (
-    (await editor.locator(".cm-line").allTextContents()).join("\n")
+    await readVaultEditorSource(editor)
   )).toBe(expectedSource);
 }
 
 async function saveActiveEntry(page) {
-  const save = page.getByRole("button", { name: "저장", exact: true });
-  const saveState = page.locator(".vault-save-state");
-  await expect(save).toBeEnabled();
-  await save.click();
-  // Disabled is also the in-flight state. In slower WebKit runs, treating that
-  // transient state as completion lets the next view render against the old
-  // persisted title while the encrypted rename/path transaction is still
-  // running. Wait for the app's terminal save signal before asserting data
-  // derived from the Vault index.
-  // The button starts enabled, then is synchronously disabled when the
-  // encrypted mutation takes ownership. Observing that transition first
-  // prevents a stale pre-click "저장됨" label from satisfying the assertion.
-  await expect(save).toBeDisabled();
-  // A backend-confirmed path rename can briefly wait for the Firestore SDK's
-  // emulator WebChannel to reconnect after registering its one-shot document
-  // targets. Keep this deadline local to the path-aware save acceptance; the
-  // test must still reach the app's terminal state and cannot pass on "내부 참조 확인 중".
-  await expect(saveState).toHaveText("저장됨", { timeout: 30_000 });
+  await saveVaultDocument(page);
 }
 
 async function expectVaultNameWritesReady(page) {
@@ -323,10 +298,8 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     }
     await today.click();
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(todayKey);
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
-    const dailySource = await page.getByRole("textbox", { name: "Markdown 편집기" })
-      .locator(".cm-line")
-      .allTextContents();
+
+    const dailySource = (await readVaultEditorSource(page.getByRole("textbox", { name: "Markdown 편집기" }))).split("\n");
     expect(dailySource.join("\n")).toContain(`type: daily-note\ndate: ${todayKey}`);
     expect(dailySource.join("\n")).toContain(`# ${todayKey}`);
     expect(dailySource.join("\n")).toContain("## 인박스");
@@ -343,7 +316,7 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
   await test.step("Drawing edits through the visual canvas and survives encrypted save", async () => {
     await openCommand(page, "새 드로잉 만들기");
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue("새 드로잉");
-    await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
+
     const drawing = page.getByRole("region", { name: "QuickMemo Drawing beta" });
     await expect(drawing).toBeVisible();
     await drawing.getByRole("button", { name: "텍스트", exact: true }).click();
@@ -384,13 +357,14 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await newNoteTab.click();
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue("새 노트");
     await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("E2E Dataview");
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(source);
     await saveActiveEntry(page);
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true }))
       .toHaveValue("E2E Dataview");
     entryIds.dataview = await activeEntryId(page);
-    await page.getByRole("button", { name: "읽기 보기", exact: true }).click();
+
+    await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+Home");
     const result = page.getByRole("region", { name: "Dataview 결과" });
     await expect(result).toBeVisible();
     await expect(result.locator("output")).not.toHaveText("0개");
@@ -419,7 +393,7 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
       "unknown: {{script:alert(1)}}"
     ].join("\n");
     await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill("회의록 템플릿");
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(templateSource);
     await saveActiveEntry(page);
     entryIds.template = await activeEntryId(page);
@@ -435,7 +409,7 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await expect(createFromTemplate).toBeEnabled();
     await createFromTemplate.click();
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(generatedTitle);
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     const generatedSource = [
       `# ${generatedTitle}`,
       "",
@@ -506,7 +480,7 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
     await page.getByRole("button", { name: "파일", exact: true }).click();
     panel = await ensureLeftPanel(page);
     await panel.getByRole("treeitem", { name: "새 드로잉", exact: true }).click();
-    await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
+
     await expect(page.getByRole("application", { name: "Drawing 캔버스" }).locator("text")).toContainText(drawingSecret);
 
     await expectPageViewportContained(page);
@@ -548,7 +522,7 @@ test("File Recovery restores an old body as a new encrypted revision", async ({
   // below has exactly one V1 content revision. A combined title+body save
   // correctly creates both a body snapshot and a subsequent rename snapshot.
   await saveActiveEntry(page);
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await editor.fill(firstVersion);
   await saveActiveEntry(page);

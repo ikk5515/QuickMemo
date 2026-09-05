@@ -189,6 +189,7 @@ export default function App() {
           <Route path="/share/:shareId" element={<PublicSharePage />} />
           <Route path="/s/:compactToken" element={<PublicSharePage />} />
           <Route path="/wiki/public/:wikiId" element={<PublicWikiPage />} />
+          <Route path="/wiki/:wikiSlug" element={<PublicWikiPage />} />
           <Route
             path="/home"
             element={

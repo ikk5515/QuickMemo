@@ -1,6 +1,7 @@
-/* global getComputedStyle */
+/* global getComputedStyle, URL */
 
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument, openVaultDocumentMenu } from "./vault-editor-helpers.mjs";
 import {
   expectCleanRuntime,
   loginDirectly,
@@ -39,13 +40,16 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
   await expect(leftPanelToggle).toHaveAttribute("aria-expanded", "true");
 
   await leftPanelToggle.click();
-  await expect(explorer).toHaveCount(0);
+  await expect(explorer).toBeHidden();
+  await expect(explorer).toHaveAttribute("inert", "");
   await expect(leftPanelToggle).toHaveAttribute("aria-expanded", "false");
+  expect(new URL(page.url()).searchParams.has("panel")).toBe(false);
 
   // A route intent is a one-shot instruction. It must not replay after the
   // user's close action when unrelated effects or encrypted state settle.
   await page.waitForTimeout(1_200);
-  await expect(explorer).toHaveCount(0);
+  await expect(explorer).toBeHidden();
+  await expect(explorer).toHaveAttribute("inert", "");
   await expect(leftPanelToggle).toHaveAttribute("aria-expanded", "false");
 
   await leftPanelToggle.click();
@@ -59,7 +63,7 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
   await createNote.click();
 
   await expect(page.getByRole("tabpanel")).toBeVisible();
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await expect(editor).toBeVisible();
   await editor.fill("# 넓은 화면\n\n편집기 폭 회귀 확인");
@@ -67,7 +71,7 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
 
   const geometry = await page.locator(".vault-note-content").evaluate((content) => {
     const sourceWrapper = content.querySelector(
-      ":scope > .vault-codemirror:not(.vault-codemirror--live-preview)"
+      ":scope > .vault-codemirror--live-preview"
     );
     const codeMirror = sourceWrapper?.querySelector(
       ":scope > .vault-codemirror-editor > .cm-editor"
@@ -88,6 +92,11 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
       editorWidth: editorBounds.width,
       gutterBackground: gutterStyle.backgroundColor,
       gutterWidth: gutterBounds.width,
+      lineNumbersPresent: Boolean(codeMirror.querySelector(".cm-lineNumbers")),
+      bodyFontSize: getComputedStyle(codeMirror.querySelector(".cm-scroller")).fontSize,
+      bodyFontFamily: getComputedStyle(codeMirror.querySelector(".cm-scroller")).fontFamily,
+      treeRowHeight: content.closest(".vault-workspace").querySelector(".vault-tree-row")?.getBoundingClientRect().height,
+      collapseButtonHeight: content.closest(".vault-workspace").querySelector(".vault-left-panel-collapse")?.getBoundingClientRect().height,
       wrapperWidth: wrapperBounds.width
     };
   });
@@ -102,7 +111,12 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     geometry.editorWidth / geometry.wrapperWidth,
     "CodeMirror must fill its full-width source wrapper"
   ).toBeGreaterThan(0.99);
-  expect(geometry.gutterWidth, "line-number gutter must remain measurable").toBeGreaterThan(20);
+  expect(geometry.gutterWidth, "folding gutter remains available beside the live document").toBeGreaterThan(0);
+  expect(geometry.lineNumbersPresent).toBe(false);
+  expect(geometry.bodyFontSize).toBe("16px");
+  expect(geometry.bodyFontFamily).not.toContain("monospace");
+  expect(geometry.treeRowHeight).toBe(28);
+  expect(geometry.collapseButtonHeight).toBe(32);
 
   const gutterChannels = geometry.gutterBackground.match(/[\d.]+/gu)?.slice(0, 3).map(Number) ?? [];
   expect(gutterChannels, `gutter color must resolve to RGB: ${geometry.gutterBackground}`)
@@ -119,14 +133,11 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
     "</div>"
   ].join("\n");
   await editor.fill(nestedHtmlSource);
-  const saveButton = page.getByRole("button", { name: "저장", exact: true });
-  await expect(saveButton).toBeEnabled();
-  await saveButton.click();
+  await saveVaultDocument(page);
   await expect.poll(async () => {
     const states = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
     return states[0]?.revision ?? 0;
   }, { timeout: 30_000 }).toBeGreaterThan(1);
-  await expect(saveButton).toBeDisabled({ timeout: 30_000 });
 
   // Turn the one encrypted Markdown fixture into the historical storage
   // identity without touching title/body ciphertext. This keeps production
@@ -221,10 +232,11 @@ test("wide source layout, files-panel intent, and legacy move/copy preserve encr
   await expect(coreDialog).toHaveCount(0);
   await explorer.getByRole("treeitem", { name: "새 노트 Markdown", exact: true }).click();
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트 Markdown");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
-  await expect(editor).toContainText("### 안쪽 제목");
-  await expect(editor).toContainText("바깥 문단");
-  await expect(editor).not.toContainText("</div>");
+
+  const copiedMarkdown = await readVaultEditorSource(editor);
+  expect(copiedMarkdown).toContain("### 안쪽 제목");
+  expect(copiedMarkdown).toContain("바깥 문단");
+  expect(copiedMarkdown).not.toContain("</div>");
 
   // The first path mutation bootstraps the fixed manifest. A subsequent
   // mutation must bind to that 33-document manifest instead of rescanning the
@@ -285,7 +297,7 @@ test("block HTML normalization creates a Markdown copy without changing its mark
   const explorer = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
   await expect(explorer).toBeVisible();
   await explorer.getByRole("button", { name: "새 노트", exact: true }).click();
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
 
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   const sourceHtml = [
@@ -298,14 +310,11 @@ test("block HTML normalization creates a Markdown copy without changing its mark
   ].join("\n");
   await editor.fill(sourceHtml);
 
-  const saveButton = page.getByRole("button", { name: "저장", exact: true });
-  await expect(saveButton).toBeEnabled();
-  await saveButton.click();
+  await saveVaultDocument(page);
   await expect.poll(async () => {
     const states = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
     return states[0]?.revision ?? 0;
   }, { timeout: 30_000 }).toBeGreaterThan(1);
-  await expect(saveButton).toBeDisabled({ timeout: 30_000 });
 
   const [sourceBeforeCopy] = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   expect(sourceBeforeCopy).toMatchObject({
@@ -314,7 +323,8 @@ test("block HTML normalization creates a Markdown copy without changing its mark
     folderId: null
   });
 
-  const normalizeButton = page.getByRole("button", { name: "HTML → Markdown 복사", exact: true });
+  await openVaultDocumentMenu(page);
+  const normalizeButton = page.getByRole("menuitem", { name: "HTML → Markdown 복사", exact: true });
   await expect(normalizeButton).toBeEnabled();
   let confirmationMessage = "";
   page.once("dialog", async (dialog) => {
@@ -340,18 +350,18 @@ test("block HTML normalization creates a Markdown copy without changing its mark
   });
 
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트 Markdown");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
-  await expect(editor).toContainText("## 프로젝트 기록");
-  await expect(editor).toContainText("**중요** 설명");
-  await expect(editor).toContainText("- 첫째");
-  await expect(editor).toContainText("- 둘째");
-  await expect(editor).not.toContainText("<h2>");
-  await expect(editor).not.toContainText("</ul>");
+
+  const normalizedSource = await readVaultEditorSource(editor);
+  expect(normalizedSource).toContain("## 프로젝트 기록");
+  expect(normalizedSource).toContain("**중요** 설명");
+  expect(normalizedSource).toContain("- 첫째");
+  expect(normalizedSource).toContain("- 둘째");
+  expect(normalizedSource).not.toContain("<h2>");
+  expect(normalizedSource).not.toContain("</ul>");
 
   await explorer.getByRole("treeitem", { name: "새 노트", exact: true }).click();
   await expect(page.getByLabel("노트 이름")).toHaveValue("새 노트");
-  await expect(editor).toContainText("<h2>프로젝트 기록</h2>");
-  await expect(editor).toContainText("<p><strong>중요</strong> 설명</p>");
+  await expect.poll(() => readVaultEditorSource(editor)).toBe(sourceHtml);
   const finalStates = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   expect(finalStates.find((state) => state.id === sourceBeforeCopy.id)).toEqual(sourceBeforeCopy);
 
@@ -383,7 +393,8 @@ test("desktop workspace controls and dark wikilinks remain deliberate", async ({
   // The desktop panel owns a dedicated chevron collapse control. Closing it
   // must leave the ribbon available as the deliberate way to reopen it.
   await explorer.getByRole("button", { name: "왼쪽 패널 접기", exact: true }).click();
-  await expect(explorer).toHaveCount(0);
+  await expect(explorer).toBeHidden();
+  await expect(explorer).toHaveAttribute("inert", "");
   await expect(ribbonToggle).toHaveAttribute("aria-expanded", "false");
   await ribbonToggle.click();
   await expect(explorer).toBeVisible();
@@ -400,7 +411,7 @@ test("desktop workspace controls and dark wikilinks remain deliberate", async ({
   await expect(createNote).toBeEnabled({ timeout: 30_000 });
   await createNote.click();
   await expect(noteTitle).toHaveValue("새 노트 2");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await editor.fill("[[새");
   await editor.press("Control+Space");
@@ -461,10 +472,7 @@ test("desktop workspace controls and dark wikilinks remain deliberate", async ({
   ).toBeGreaterThanOrEqual(4.5);
   await editor.press("Escape");
 
-  const saveButton = page.getByRole("button", { name: "저장", exact: true });
-  await expect(saveButton).toBeEnabled();
-  await saveButton.click();
-  await expect(saveButton).toBeDisabled({ timeout: 30_000 });
+  await saveVaultDocument(page);
 
   for (const retiredAction of ["새 Canvas", "새 Base", "새 Kanban"]) {
     await expect(page.getByRole("button", { name: retiredAction, exact: true })).toHaveCount(0);

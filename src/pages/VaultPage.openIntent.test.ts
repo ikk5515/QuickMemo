@@ -24,8 +24,10 @@ describe("Vault entry open intent wiring", () => {
     expect(openEntry).toContain("newGroupPlan?.groupId ?? activeTabGroupId");
     expect(openEntry).toContain("workspaceEntryTabId(entryId, targetGroupId)");
     expect(openEntry).toContain('targetGroupId === "primary" ? {} : { instanceId: targetGroupId }');
-    expect(openEntry).toContain("openWorkspaceTabInGroup(tabGroups, nextTab.id, targetGroupId, replaceTabId)");
+    expect(openEntry).toContain("openWorkspaceTabInGroup(tabGroups, nextTab.id, targetGroupId)");
     expect(openEntry).toContain("setWorkspaceLayout(newGroupPlan.layout)");
+    expect(openEntry).not.toContain("replaceTabId");
+    expect(openEntry).not.toContain("tabs.filter");
     expect(openEntry).toContain("setActiveTabGroupId(groupPlan.activeTabGroupId)");
   });
 
@@ -34,7 +36,8 @@ describe("Vault entry open intent wiring", () => {
     const treeComponentStart = source.indexOf("function VaultFileTree(");
     expect(treeComponentStart).toBeGreaterThanOrEqual(0);
     const treeComponent = source.slice(treeComponentStart);
-    expect(treeRender).toContain("onOpenEntry={openEntry}");
+    expect(treeRender).toContain("onOpenEntry={stableTreeOpenEntry}");
+    expect(source).toContain("useStableEvent(openEntry)");
     expect(treeComponent).toContain("onOpenEntry(note.id, graphOpenIntentFromModifiers(event))");
   });
 

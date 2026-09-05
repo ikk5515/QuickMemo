@@ -27,10 +27,14 @@ async function openRightPanel(page, { keepLeftOpen = false } = {}) {
 }
 
 async function expectHorizontallyContained(container, target) {
-  const [containerBounds, targetBounds] = await Promise.all([
-    container.boundingBox(),
-    target.boundingBox()
-  ]);
+  const containerElement = await container.elementHandle();
+  expect(containerElement).not.toBeNull();
+  // Compare both rectangles in one browser frame, including during movement.
+  const { containerBounds, targetBounds } = await target.evaluate((element, parent) => {
+    const outer = parent.getBoundingClientRect(), inner = element.getBoundingClientRect();
+    return { containerBounds: { x: outer.x, width: outer.width }, targetBounds: { x: inner.x, width: inner.width } };
+  }, containerElement);
+  await containerElement.dispose();
   expect(containerBounds).not.toBeNull();
   expect(targetBounds).not.toBeNull();
   if (!containerBounds || !targetBounds) return;
@@ -64,6 +68,11 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
   await expect(page.getByLabel("Vault 이름 무결성 준비")).toHaveCount(0, { timeout: 35_000 });
   await expect(workspace).toHaveAttribute("data-workspace-sync", "saved", { timeout: 35_000 });
   const panel = await openRightPanel(page, { keepLeftOpen: !mobileLayout });
+  for (const surface of [workspace, panel]) {
+    await expect.poll(() => surface.evaluate((element) => element.getAnimations()
+      .filter((animation) => animation.playState === "running" && animation.effect?.getTiming().iterations !== Infinity).length),
+    { message: "sidebar geometry settles before containment measurements" }).toBe(0);
+  }
   if (!mobileLayout) {
     const leftPanel = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
     const center = workspace.locator(".vault-center");

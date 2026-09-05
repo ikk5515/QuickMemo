@@ -41,7 +41,7 @@ describe("Vault graph viewport persistence", () => {
     );
     const localQueue = sourceBetween(
       "const queueLocalGraphViewport = useCallback((viewport: GraphViewport) => {",
-      "const activeMobileDrawer = mobileLayout"
+      'const activeMobileDrawer = surface === "memo" && mobileLayout'
     );
 
     for (const [queue, scope] of [[globalQueue, "global"], [localQueue, "local"]] as const) {

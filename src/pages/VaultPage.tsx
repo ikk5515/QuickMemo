@@ -1,3 +1,8 @@
+import { hasFeatureAccess } from "../lib/featureAccess";
+import { SidebarResizeHandle } from "../components/SidebarResizeHandle";
+import { useWorkspaceSidebarPreference } from "../features/workspace/useWorkspaceSidebarPreference";
+import { publicationSourceIds, useWikiAutoPublication } from "../features/wiki/useWikiAutoPublication";
+import type { WikiPublicationSelection } from "../features/wiki/publishedWikiTypes";
 import {
   Bookmark,
   BookOpen,
@@ -22,6 +27,7 @@ import {
   Link2,
   ListTree,
   Menu,
+  MoreHorizontal,
   Network,
   PanelRight,
   Pin,
@@ -37,11 +43,13 @@ import {
 } from "lucide-react";
 import {
   type CSSProperties,
+  type ReactNode,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   lazy,
+  memo,
   Suspense,
   useCallback,
   useDeferredValue,
@@ -54,7 +62,9 @@ import {
 } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { AppShell } from "../components/AppShell";
+import { useModalFocus } from "../lib/useModalFocus";
 import { ReadonlyNoteRenderer } from "../components/ReadonlyNoteRenderer";
+import { VaultLegacyNote } from "../features/vault/VaultLegacyNote";
 import { UnlockPanel } from "../components/UnlockPanel";
 import { useVaultDecryptionSession } from "../context/VaultDecryptionContext";
 import type { VaultDecryptionSession } from "../features/vault/vaultDecryptionSession";
@@ -157,7 +167,6 @@ import {
   type VaultIndexEntry
 } from "../features/knowledge";
 import {
-  MarkdownRenderer,
   exportMarkdown,
   exportMarkdownForDiscordAi,
   previewMarkdownHtmlNormalization,
@@ -174,6 +183,11 @@ import type {
   MarkdownImagePasteContext,
   MarkdownImagePasteResult
 } from "../features/vault/CodeMirrorMarkdownEditor";
+import { MarkdownEditorSessionStore } from "../features/vault/markdownEditorSession";
+import { LivePreviewUpdates } from "../features/vault/livePreviewUpdates";
+import type { WikiDocumentContext } from "../features/wiki/WikiReader";
+import type { WikiReadableNote } from "../features/wiki/wikiModel";
+import type { ControlledSidebarPreference } from "../features/workspace/useResizableSidebar";
 import { WorkspacePaneTree, type WorkspacePaneRender } from "../features/vault/WorkspacePaneTree";
 import { VaultAssetPreview } from "../features/vault/VaultAssetPreview";
 import { VaultArchivedFilePreview } from "../features/vault/VaultArchivedFilePreview";
@@ -455,6 +469,7 @@ const LazyDailyNotesCalendar = lazy(() => import("../features/calendar/DailyNote
   default: module.DailyNotesCalendar
 })));
 const LazyDailyNotesSettings = lazy(() => import("../features/calendar/DailyNotesSettings"));
+const LazyWikiReader = lazy(() => import("../features/wiki/WikiReader").then((module) => ({ default: module.WikiReader })));
 const LazyCodeMirrorMarkdownEditor = lazy(() => import("../features/vault/CodeMirrorMarkdownEditor").then((module) => ({
   default: module.CodeMirrorMarkdownEditor
 })));
@@ -864,6 +879,9 @@ function InactiveWorkspacePane({
   onChange,
   onPasteImages,
   onSave,
+  onCompositionChange,
+  sessionStore,
+  sessionScopeKey,
   readOnly,
   tab
 }: {
@@ -875,6 +893,9 @@ function InactiveWorkspacePane({
   onChange: (body: string) => void;
   onPasteImages?: CodeMirrorMarkdownEditorProps["onPasteImages"];
   onSave: () => void;
+  onCompositionChange: (composing: boolean) => void;
+  sessionStore: MarkdownEditorSessionStore;
+  sessionScopeKey: string;
   readOnly: boolean;
   tab: WorkspaceTab | null;
 }) {
@@ -892,6 +913,9 @@ function InactiveWorkspacePane({
         ) : note?.entryKind === "markdown" && note.contentFormat === "markdown-v1" && draft ? (
           <VaultMarkdownEditor
             documentKey={documentKey}
+            sessionStore={sessionStore}
+            sessionScopeKey={sessionScopeKey}
+            onCompositionChange={onCompositionChange}
             livePreview
             onChange={onChange}
             onPasteImages={onPasteImages}
@@ -1283,7 +1307,7 @@ function useStableEvent<Arguments extends unknown[], Result>(
   handler: (...args: Arguments) => Result
 ) {
   const handlerRef = useRef(handler);
-  useEffect(() => {
+  useLayoutEffect(() => {
     handlerRef.current = handler;
   }, [handler]);
   return useCallback((...args: Arguments) => handlerRef.current(...args), []);
@@ -1666,8 +1690,11 @@ function UnlockedVaultPage({
   decryptionSession,
   getIdToken,
   privateKey,
-  profile
-}: {
+  profile,
+  surface = "memo",
+  wikiHeaderActions,
+  wikiSidebarPreference
+}: VaultPageProps & {
   decryptionSession: VaultDecryptionSession;
   getIdToken: () => Promise<string>;
   privateKey: CryptoKey;
@@ -1747,6 +1774,9 @@ function UnlockedVaultPage({
   // prevents a saved closed layout from flashing both sidebars on first paint.
   // First-time vaults still receive the open-panel defaults from
   // createDefaultVaultWorkspaceState() in applyRestoredWorkspace().
+  const memoSidebarPreference = useWorkspaceSidebarPreference("memo", profile.uid);
+  const memoSidebarPreferenceRef = useRef(memoSidebarPreference);
+  memoSidebarPreferenceRef.current = memoSidebarPreference;
   const [leftOpen, setLeftOpen] = useState(false);
   const [rightOpen, setRightOpen] = useState(false);
   const leftOpenRef = useRef(leftOpen);
@@ -1778,7 +1808,22 @@ function UnlockedVaultPage({
   const draftsRef = useRef(drafts);
   const draftSessionScopeRef = useRef({ uid: profile.uid, privateKey });
   const markdownDraftRevisionRef = useRef(0);
-  const [viewMode, setViewMode] = useState<MarkdownViewMode>("live-preview");
+  const viewMode: MarkdownViewMode = "live-preview";
+  const editorSessionStore = useMemo(() => {
+    void privateKey;
+    return new MarkdownEditorSessionStore(profile.uid);
+  }, [profile.uid, privateKey]);
+  const editorPreviewUpdates = useMemo(() => {
+    // Preview subscribers have the same authorized lifetime as editor sessions.
+    void editorSessionStore;
+    return new LivePreviewUpdates();
+  }, [editorSessionStore]);
+  const composingEntryIdsRef = useRef(new Set<string>());
+  const [wikiOpenDocumentRequest, setWikiOpenDocumentRequest] = useState<{ id: string; requestId: number }>();
+  const wikiReaderActivationRef = useRef(false);
+  const [wikiInspectorOpen, setWikiInspectorOpen] = useState(false);
+  const wikiProjectedNotesRef = useRef(new Map<string, { note: DecryptedVaultNote; draft?: DraftState; value: WikiReadableNote }>());
+  const [editorSearchRequest, setEditorSearchRequest] = useState<{ entryId: string; id: number } | null>(null);
   const [pagePreview, setPagePreview] = useState<ActiveVaultPagePreview | null>(null);
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [calendarCursorMonth, setCalendarCursorMonth] = useState(() => localMonthKey(new Date()));
@@ -1789,6 +1834,7 @@ function UnlockedVaultPage({
   const [compactCalendarOpen, setCompactCalendarOpen] = useState(false);
   const [templateDialogMode, setTemplateDialogMode] = useState<"insert" | "create" | null>(null);
   const [activeCoreTool, setActiveCoreTool] = useState<VaultCoreToolId | null>(null);
+  const [formatSourceEntryId, setFormatSourceEntryId] = useState<string | null>(null);
   const [editorSelection, setEditorSelection] = useState<{ end: number; start: number } | null>(null);
   const [globalGraphSettings, setGlobalGraphSettings] = useState<UiGraphViewSettings>(() => createDefaultGlobalGraphSettings());
   const [localGraphSettings, setLocalGraphSettings] = useState<UiGraphViewSettings>(() => createDefaultLocalGraphSettings());
@@ -1857,7 +1903,7 @@ function UnlockedVaultPage({
   const [importRecoveryOpen, setImportRecoveryOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<VaultContextMenuState | null>(null);
   const [moveTarget, setMoveTarget] = useState<VaultMoveTarget | null>(null);
-  const [wikiPublishTarget, setWikiPublishTarget] = useState<{ folderId: string; returnFocusTo?: HTMLElement | null } | null>(null);
+  const [wikiPublishTarget, setWikiPublishTarget] = useState<{ folderId: string | null; returnFocusTo?: HTMLElement | null } | null>(null);
   const [shareTarget, setShareTarget] = useState<VaultShareDialogState | null>(null);
   const [participantShareTarget, setParticipantShareTarget] = useState<VaultShareDialogState | null>(null);
   const decryptGeneration = useRef(0);
@@ -1873,7 +1919,7 @@ function UnlockedVaultPage({
   const importInputRef = useRef<HTMLInputElement>(null);
   const templateApplyBusyRef = useRef(false);
   const trashButtonRef = useRef<HTMLButtonElement>(null);
-  const markdownCopySelectRef = useRef<HTMLSelectElement>(null);
+  const documentMenuButtonRef = useRef<HTMLButtonElement>(null);
   const trashDecryptGenerationRef = useRef(0);
   const trashFolderDecryptGenerationRef = useRef(0);
   const allVisibleNoteSnapshotsRef = useRef<NoteSnapshot[]>([]);
@@ -2043,23 +2089,35 @@ function UnlockedVaultPage({
     setPagePreview(null);
   }, []);
   const mobileLayout = useMobileVaultLayout();
+  const leftPanelMaxWidth = Math.max(180, Math.min(520, (vaultWorkspaceWidth || vaultViewportWidth) - 44 - 300 - (rightOpen ? 250 : 0)));
+  const effectiveLeftPanelWidth = Math.max(180, Math.min(leftPanelMaxWidth, memoSidebarPreference.width));
+  useEffect(() => {
+    if (!mobileLayout) setLeftOpen(!memoSidebarPreference.collapsed);
+    desktopLeftOpenRef.current = !memoSidebarPreference.collapsed;
+  }, [memoSidebarPreference.collapsed, mobileLayout]);
   const compactCalendarLayout = useCompactCalendarLayout();
   const isOnline = useOnlineStatus();
   const rightPanelMaxWidth = maxVaultRightPanelWidthForViewport(
     vaultViewportWidth,
     leftOpen,
-    vaultWorkspaceWidth
+    vaultWorkspaceWidth,
+    effectiveLeftPanelWidth
   );
   const effectiveRightPanelWidth = clampVaultRightPanelWidthForViewport(
     rightPanelWidth,
     vaultViewportWidth,
     leftOpen,
-    vaultWorkspaceWidth
+    vaultWorkspaceWidth,
+    effectiveLeftPanelWidth
   );
+  const [wikiWorkspaceHeight, setWikiWorkspaceHeight] = useState(() => window.innerHeight);
   useLayoutEffect(() => {
     const workspace = vaultWorkspaceRef.current;
     if (!workspace) return;
-    const updateViewportWidth = () => setVaultWorkspaceWidth(workspace.clientWidth || window.innerWidth);
+    const updateViewportWidth = () => {
+      setVaultWorkspaceWidth(workspace.clientWidth || window.innerWidth);
+      setWikiWorkspaceHeight(workspace.clientHeight || window.innerHeight);
+    };
     updateViewportWidth();
     if (typeof ResizeObserver === "undefined") {
       window.addEventListener("resize", updateViewportWidth);
@@ -2105,6 +2163,7 @@ function UnlockedVaultPage({
     || vaultImportBusy
     || entryMutationPromisesRef.current.size > 0
     || pendingClipboardPasteCountsRef.current.size > 0
+    || composingEntryIdsRef.current.size > 0
     || Object.values(draftsRef.current).some((draft) => draft.dirty)
     || globalViewportCommitTimerRef.current !== null
     || localViewportCommitTimerRef.current !== null
@@ -2216,7 +2275,7 @@ function UnlockedVaultPage({
       setLocalViewport({ ...localViewportRef.current });
     }, GRAPH_VIEWPORT_COMMIT_DELAY_MS);
   }, [cancelScheduledWorkspaceSave]);
-  const activeMobileDrawer = mobileLayout
+  const activeMobileDrawer = surface === "memo" && mobileLayout
     ? leftOpen ? "left" : rightOpen ? "right" : null
     : null;
   const vaultBookmarks = useMemo<PersistedVaultBookmark[]>(() => {
@@ -2474,6 +2533,9 @@ function UnlockedVaultPage({
     foldersRef.current = [];
     folderPathsRef.current = new Map();
     setFolders([]);
+    editorSessionStore.clear();
+    wikiProjectedNotesRef.current.clear();
+    composingEntryIdsRef.current.clear();
     draftsRef.current = {};
     setDrafts({});
     draftBaseSnapshotsRef.current.clear();
@@ -2555,7 +2617,7 @@ function UnlockedVaultPage({
       return null;
     });
     setKnowledgeClientGeneration((current) => current + 1);
-  }, [decryptionSession, resetPastedImageFolderRuntime]);
+  }, [decryptionSession, editorSessionStore, resetPastedImageFolderRuntime]);
 
   useLayoutEffect(() => {
     const previousOwnerIdKey = previousOwnerIdKeyRef.current;
@@ -2598,10 +2660,10 @@ function UnlockedVaultPage({
       reconciledGroups.groups.map((group) => group.id)
     ));
     setLeftMode(restored.left.mode);
-    desktopLeftOpenRef.current = restored.left.open;
+    desktopLeftOpenRef.current = !memoSidebarPreferenceRef.current.collapsed;
     desktopRightOpenRef.current = restored.right.open;
     const restorePanels = !mobileVaultLayoutSnapshot();
-    setLeftOpen(restorePanels && restored.left.open);
+    setLeftOpen(restorePanels && !memoSidebarPreferenceRef.current.collapsed);
     setRightMode(restored.right.mode);
     setRightPanelWidth(restored.right.width);
     setRightOpen(restorePanels && restored.right.open);
@@ -2618,7 +2680,6 @@ function UnlockedVaultPage({
         path: bookmark.path
       })));
     setSearchBookmarks(restored.searchBookmarks);
-    setViewMode(restored.viewMode);
     setCalendarOpen(restored.plugins.calendar.open);
     setCalendarCursorMonth(restored.plugins.calendar.cursorMonth);
     setDailyNotesFolderId(restored.plugins.calendar.folderId ?? null);
@@ -2799,9 +2860,10 @@ function UnlockedVaultPage({
       requestedWidth,
       vaultViewportWidth,
       leftOpen,
-      vaultWorkspaceWidth
+      vaultWorkspaceWidth,
+      effectiveLeftPanelWidth
     )
-  ), [leftOpen, vaultViewportWidth, vaultWorkspaceWidth]);
+  ), [effectiveLeftPanelWidth, leftOpen, vaultViewportWidth, vaultWorkspaceWidth]);
 
   const queueRightPanelResize = useCallback((requestedWidth: number) => {
     const resize = rightPanelResizeRef.current;
@@ -2873,38 +2935,62 @@ function UnlockedVaultPage({
     setRightPanelWidth(clampRightPanelWidthForCurrentLayout(requestedWidth));
   }, [clampRightPanelWidthForCurrentLayout, effectiveRightPanelWidth, rightPanelMaxWidth]);
 
+  const consumeWorkspacePanelIntent = useCallback(() => {
+    if (!requestedWorkspacePanel || requestedWorkspaceView === "graph") return;
+    // Explicit panel controls take precedence even while encrypted workspace
+    // metadata is loading. Remove only this one-shot intent so reload respects
+    // the user's stored collapsed preference and preserves entry/view queries.
+    handledWorkspaceRouteIntentRef.current = JSON.stringify([
+      profile.uid, location.key, requestedWorkspaceView, requestedWorkspacePanel
+    ]);
+    const next = new URLSearchParams(searchParams);
+    next.delete("panel");
+    navigate({ pathname: location.pathname, search: next.toString(), hash: location.hash }, { replace: true, state: location.state });
+  }, [location.hash, location.key, location.pathname, location.state, navigate, profile.uid, requestedWorkspacePanel, requestedWorkspaceView, searchParams]);
+
   const closeLeftPanel = useCallback(() => {
+    consumeWorkspacePanelIntent();
+    const preference = memoSidebarPreferenceRef.current;
+    preference.onChange({ width: preference.width, collapsed: true });
     setLeftOpen(false);
     if (mobileLayout) restoreMobileDrawerFocus(leftPanelToggleRef.current);
-  }, [mobileLayout, restoreMobileDrawerFocus]);
+  }, [consumeWorkspacePanelIntent, mobileLayout, restoreMobileDrawerFocus]);
 
   const closeRightPanel = useCallback(() => {
+    setWikiInspectorOpen(false);
     setRightOpen(false);
     if (mobileLayout) restoreMobileDrawerFocus(rightPanelToggleRef.current);
   }, [mobileLayout, restoreMobileDrawerFocus]);
 
   const showLeftPanel = useCallback((mode?: LeftPanelMode) => {
+    consumeWorkspacePanelIntent();
     if (mode) {
       setLeftMode(mode);
     }
     if (!leftOpenRef.current) rememberMobileDrawerTrigger(leftPanelToggleRef.current);
+    const preference = memoSidebarPreferenceRef.current;
+    preference.onChange({ width: preference.width, collapsed: false });
     setLeftOpen(true);
     if (mobileLayout) {
       setRightOpen(false);
     }
-  }, [mobileLayout, rememberMobileDrawerTrigger]);
+  }, [consumeWorkspacePanelIntent, mobileLayout, rememberMobileDrawerTrigger]);
 
   const showRightPanel = useCallback((mode: RightPanelMode) => {
     setRightMode(mode);
+    if (surface === "wiki") { setWikiInspectorOpen(true); return; }
     if (!rightOpen) rememberMobileDrawerTrigger(rightPanelToggleRef.current);
     setRightOpen(true);
     if (mobileLayout) {
       setLeftOpen(false);
     }
-  }, [mobileLayout, rememberMobileDrawerTrigger, rightOpen]);
+  }, [mobileLayout, rememberMobileDrawerTrigger, rightOpen, surface]);
 
   const toggleLeftPanel = useCallback(() => {
+    consumeWorkspacePanelIntent();
     const next = !leftOpen;
+    const preference = memoSidebarPreferenceRef.current;
+    preference.onChange({ width: preference.width, collapsed: !next });
     if (next) rememberMobileDrawerTrigger(leftPanelToggleRef.current);
     setLeftOpen(next);
     if (next && mobileLayout) {
@@ -2912,7 +2998,7 @@ function UnlockedVaultPage({
     } else if (!next && mobileLayout) {
       restoreMobileDrawerFocus(leftPanelToggleRef.current);
     }
-  }, [leftOpen, mobileLayout, rememberMobileDrawerTrigger, restoreMobileDrawerFocus]);
+  }, [consumeWorkspacePanelIntent, leftOpen, mobileLayout, rememberMobileDrawerTrigger, restoreMobileDrawerFocus]);
 
   const toggleRightPanel = useCallback(() => {
     const next = !rightOpen;
@@ -3041,6 +3127,9 @@ function UnlockedVaultPage({
     folderSubscriptionServerReadyRef.current = false;
     pendingFolderRestoreRef.current = null;
     folderPathsRef.current = new Map();
+    editorSessionStore.clear();
+    wikiProjectedNotesRef.current.clear();
+    composingEntryIdsRef.current.clear();
     draftsRef.current = {};
     draftBaseSnapshotsRef.current.clear();
     draftMergeRequestGenerationRef.current += 1;
@@ -3079,7 +3168,7 @@ function UnlockedVaultPage({
       window.clearTimeout(workspaceSaveDebounceTimerRef.current);
       workspaceSaveDebounceTimerRef.current = null;
     }
-  }, [resetPastedImageFolderRuntime]);
+  }, [editorSessionStore, resetPastedImageFolderRuntime]);
 
   useEffect(() => {
     decodedAssetCacheRef.current.clear();
@@ -5087,6 +5176,7 @@ function UnlockedVaultPage({
     // next attempt. Cancel only this entry so unrelated notes keep their own
     // idle deadlines.
     entryAutosaveRef.current?.cancel(entryId);
+    if (composingEntryIdsRef.current.has(entryId)) return;
     if (!pastedImageSourceCommit) {
       const blockedRollbacks = blockedPastedImageRollbackReleasesRef.current.get(entryId);
       if (blockedRollbacks) {
@@ -5440,6 +5530,10 @@ function UnlockedVaultPage({
   }, [isOnline, saveEntry, saveFailedEntryIds]);
 
   async function flushDirtyEntries(allowDiscard = true) {
+    if (composingEntryIdsRef.current.size) {
+      setStatus("입력을 마친 뒤 화면을 이동해 주세요.");
+      return false;
+    }
     const dirtyEntryIds = Object.entries(draftsRef.current)
       .filter(([, draft]) => draft.dirty)
       .map(([entryId]) => entryId);
@@ -5569,7 +5663,7 @@ function UnlockedVaultPage({
 
   useEffect(() => {
     const preventAccidentalUnload = (event: BeforeUnloadEvent) => {
-      const hasDirtyDrafts = Object.values(draftsRef.current).some((draft) => draft.dirty);
+      const hasDirtyDrafts = composingEntryIdsRef.current.size > 0 || Object.values(draftsRef.current).some((draft) => draft.dirty);
       const hasUnsavedWorkspace = workspaceInteractionDuringLoadRef.current || (
         workspaceReady
         && (
@@ -5618,7 +5712,7 @@ function UnlockedVaultPage({
     if (!autosave) return;
     const dirtyEntryIds = new Set<string>();
     for (const [entryId, draft] of Object.entries(drafts)) {
-      if (!draft.dirty || conflictedEntryIds.has(entryId)) continue;
+      if (!draft.dirty || conflictedEntryIds.has(entryId) || composingEntryIdsRef.current.has(entryId)) continue;
       dirtyEntryIds.add(entryId);
       const entryKind = notesRef.current.find((note) => note.id === entryId)?.entryKind;
       autosave.schedule(
@@ -5635,6 +5729,19 @@ function UnlockedVaultPage({
     entryAutosaveRef.current?.cancelAll();
     entryAutosaveRetryCountsRef.current.clear();
   }, []);
+
+  useEffect(() => () => editorSessionStore.clear(), [editorSessionStore]);
+
+  function handleEditorComposition(entryId: string, composing: boolean) {
+    if (composing) {
+      composingEntryIdsRef.current.add(entryId);
+      entryAutosaveRef.current?.cancel(entryId);
+    } else {
+      composingEntryIdsRef.current.delete(entryId);
+      const draft = draftsRef.current[entryId];
+      if (draft?.dirty) entryAutosaveRef.current?.schedule(entryId, draft, vaultEntryAutosaveIdleMs("markdown"), () => void saveEntryRef.current(entryId));
+    }
+  }
 
   function updateEntryDraft(
     entryId: string,
@@ -5770,6 +5877,9 @@ function UnlockedVaultPage({
     if (!note) {
       return;
     }
+    if (surface === "wiki" && !wikiReaderActivationRef.current) {
+      setWikiOpenDocumentRequest({ id: entryId, requestId: ++editorRequestIdRef.current });
+    }
     if (intent.target === "new-window") {
       if (activeEntryId) {
         void saveEntry(activeEntryId);
@@ -5801,22 +5911,13 @@ function UnlockedVaultPage({
       ...(targetGroupId === "primary" ? {} : { instanceId: targetGroupId }),
       label: entryLabel(note)
     };
-    const activeGroup = tabGroups.find((group) => group.id === activeTabGroupId);
-    const activeWorkspaceTab = tabs.find((tab) => tab.id === activeGroup?.activeTabId);
-    const tabAlreadyOpen = tabs.some((tab) => tab.id === nextTab.id);
-    const replaceTabId = !tabAlreadyOpen && intent.target === "current" && activeWorkspaceTab && !activeWorkspaceTab.pinned
-      ? activeWorkspaceTab.id
-      : null;
     setTabs((current) => {
       if (current.some((tab) => tab.id === nextTab.id)) {
         return current;
       }
-      if (replaceTabId) {
-        return current.map((tab) => tab.id === replaceTabId ? nextTab : tab);
-      }
       return [...current, nextTab];
     });
-    const groupPlan = openWorkspaceTabInGroup(tabGroups, nextTab.id, targetGroupId, replaceTabId);
+    const groupPlan = openWorkspaceTabInGroup(tabGroups, nextTab.id, targetGroupId);
     if (newGroupPlan) setWorkspaceLayout(newGroupPlan.layout);
     setTabGroups(groupPlan.groups);
     setActiveTabGroupId(groupPlan.activeTabGroupId);
@@ -5911,6 +6012,7 @@ function UnlockedVaultPage({
       pendingEntryCreationRef.current = createdEntry;
       setPendingEntryCreation(createdEntry);
       pendingCreatedEntryIdsRef.current.add(result.noteId);
+      if (surface === "wiki") setWikiOpenDocumentRequest({ id: result.noteId, requestId: ++editorRequestIdRef.current });
       setTabs((current) => [...current.filter((item) => item.id !== tab.id), tab]);
       const groupPlan = openWorkspaceTabInGroup(tabGroups, tab.id, activeTabGroupId);
       setTabGroups(groupPlan.groups);
@@ -6064,6 +6166,10 @@ function UnlockedVaultPage({
       return;
     }
     const closingTab = tabs.find((tab) => tab.id === tabId);
+    if (closingTab?.kind === "entry" && composingEntryIdsRef.current.has(closingTab.entryId)) {
+      setStatus("입력을 마친 뒤 문서를 닫아주세요.");
+      return;
+    }
     const ownerGroup = tabGroups.find((group) => group.tabIds.includes(tabId));
     const groupTabs = ownerGroup
       ? ownerGroup.tabIds.flatMap((id) => {
@@ -6145,7 +6251,7 @@ function UnlockedVaultPage({
     setTabs((current) => toggleWorkspaceTabPinned(current, tabId));
   }
 
-  async function createFolder() {
+  async function createFolder(parentFolderId = selectedFolderId) {
     if (pendingEntryCreationRef.current) {
       setError("새 항목의 암호화 생성이 끝난 뒤 새 폴더를 만들어주세요.");
       return;
@@ -6157,8 +6263,8 @@ function UnlockedVaultPage({
       return;
     }
     if (
-      selectedFolderId !== null
-      && folderTrashLockedFolderIdsRef.current.has(selectedFolderId)
+      parentFolderId !== null
+      && folderTrashLockedFolderIdsRef.current.has(parentFolderId)
     ) {
       setError("폴더 휴지통 처리가 끝난 뒤 하위 폴더를 만들어주세요.");
       return;
@@ -6168,7 +6274,7 @@ function UnlockedVaultPage({
       return;
     }
     if (folders.some((folder) => (
-      (folder.parentId ?? null) === selectedFolderId
+      (folder.parentId ?? null) === parentFolderId
       && folder.displayName.trim().localeCompare(name.trim(), undefined, { sensitivity: "accent" }) === 0
     ))) {
       setError("같은 위치에 동일한 이름의 폴더가 있습니다.");
@@ -6179,10 +6285,10 @@ function UnlockedVaultPage({
         ...folders,
         {
           id: `pending-folder-${crypto.randomUUID()}`,
-          parentId: selectedFolderId
+          parentId: parentFolderId
         }
       ]);
-      await createEncryptedVaultFolder(profile, vaultIntegrityKey, name, selectedFolderId, folders.length);
+      await createEncryptedVaultFolder(profile, vaultIntegrityKey, name, parentFolderId, folders.length);
       setStatus("암호화 폴더를 만들었습니다.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "폴더를 만들지 못했습니다.");
@@ -6419,28 +6525,17 @@ function UnlockedVaultPage({
     }
   }
 
-  async function prepareFolderWikiPublication(rootFolderId: string, signal: AbortSignal) {
+  async function prepareWorkspaceWikiPublication(selection: WikiPublicationSelection, signal: AbortSignal, savedOnly = false) {
     const assertActive = () => {
       signal.throwIfAborted();
       decryptionSession.assertSession(profile.uid, privateKey);
-      const root = foldersRef.current.find((folder) => folder.id === rootFolderId);
-      if (!root || root.ownerUid !== profile.uid || root.isDeleted) throw new Error("공개할 폴더를 다시 확인해 주세요.");
     };
     assertActive();
-    const folderIds = new Set([rootFolderId]);
-    const childIds = new Map<string, string[]>();
-    for (const folder of foldersRef.current) {
-      if (folder.ownerUid !== profile.uid || folder.isDeleted || !folder.parentId) continue;
-      const children = childIds.get(folder.parentId) ?? [];
-      children.push(folder.id); childIds.set(folder.parentId, children);
-    }
-    const pending = [rootFolderId];
-    for (let index = 0; index < pending.length; index += 1) {
-      for (const id of childIds.get(pending[index]) ?? []) {
-        if (!folderIds.has(id)) { folderIds.add(id); pending.push(id); }
-      }
-    }
-    const sourceIds = notesRef.current.filter((note) => note.ownerUid === profile.uid && !note.isDeleted && !note.isPurged && note.folderId && folderIds.has(note.folderId)).map((note) => note.id);
+    const source = publicationSourceIds(profile.uid, selection, notesRef.current, foldersRef.current);
+    const folderIds = source.folderIds;
+    const sourceIds = source.notes.map((note) => note.id);
+    if (sourceIds.some((id) => composingEntryIdsRef.current.has(id))) throw new Error("입력을 마친 뒤 공개 내용을 반영합니다.");
+    if (savedOnly && sourceIds.some((id) => draftsRef.current[id]?.dirty || entryMutationPromisesRef.current.has(id))) throw new Error("저장을 마친 뒤 공개 내용을 반영합니다.");
     if (sourceIds.some(clipboardAssetsPendingForEntry) || [...folderIds].some(clipboardAssetsPendingForFolder)) throw new Error("이미지 저장을 마친 뒤 공개 설정을 다시 열어 주세요.");
     const dirtyEntryIds = sourceIds.filter((id) => draftsRef.current[id]?.dirty);
     const unsaved = await flushVaultDraftsBeforePathRewriteRecovery({
@@ -6463,7 +6558,10 @@ function UnlockedVaultPage({
     if (unsafe()) throw new Error("최신 저장 내용을 기다리고 있습니다. 잠시 후 다시 확인해 주세요.");
     const { prepareWikiPublication } = await import("../features/wiki/prepareWikiPublication");
     assertActive();
-    return prepareWikiPublication({ rootFolderId, notes: notesRef.current, folders: foldersRef.current });
+    const latestSource = publicationSourceIds(profile.uid, selection, notesRef.current, foldersRef.current);
+    if (latestSource.notes.some((note) => composingEntryIdsRef.current.has(note.id) || draftsRef.current[note.id]?.dirty || entryMutationPromisesRef.current.has(note.id) || clipboardAssetsPendingForEntry(note.id))
+      || [...latestSource.folderIds].some(clipboardAssetsPendingForFolder)) throw new Error("변경된 메모의 저장을 마친 뒤 공개 내용을 반영합니다.");
+    return prepareWikiPublication({ rootFolderId: null, ownerUid: profile.uid, selection, notes: notesRef.current, folders: foldersRef.current });
   }
 
   function excludedSharedRewriteSourceCount(pathChanges: readonly {
@@ -8640,7 +8738,7 @@ function UnlockedVaultPage({
     interaction: MarkdownLinkPreviewInteraction
   ) {
     const { active, anchor, source } = interaction;
-    if ((viewMode !== "reading" && viewMode !== "live-preview") || reference.kind === "external") {
+    if (reference.kind === "external") {
       return;
     }
     if (
@@ -8756,8 +8854,8 @@ function UnlockedVaultPage({
     }
   }
 
-  function renderMarkdownEmbed(reference: MarkdownLinkReference) {
-    const resolution = resolveMarkdownReference(reference);
+  function renderMarkdownEmbed(reference: MarkdownLinkReference, sourceEntryId = activeEntryId) {
+    const resolution = resolveMarkdownReference(reference, sourceEntryId);
     const target = resolution?.targetEntryId
       ? notes.find((note) => note.id === resolution.targetEntryId)
       : null;
@@ -8803,7 +8901,9 @@ function UnlockedVaultPage({
     );
   }
 
-  async function copyCurrent(profileName: MarkdownExportProfile) {
+  async function copyCurrent(profileName: MarkdownExportProfile, entryId = activeEntryId) {
+    const activeNote = notesRef.current.find((note) => note.id === entryId);
+    const activeDraft = entryId ? draftsRef.current[entryId] : undefined;
     if (!activeNote || !activeDraft || activeNote.contentFormat !== "markdown-v1") {
       return;
     }
@@ -8835,11 +8935,8 @@ function UnlockedVaultPage({
     }
   }
 
-  async function convertLegacyNote() {
-    if (!activeNote || activeNote.contentFormat !== "legacy-html-v1") {
-      return;
-    }
-    openCoreTool("format");
+  function convertLegacyNote(entryId: string) {
+    openCoreTool("format", entryId);
   }
 
   async function createNormalizedMarkdownCopy() {
@@ -9386,7 +9483,6 @@ function UnlockedVaultPage({
         result
       );
       const id = ++editorRequestIdRef.current;
-      setViewMode("live-preview");
       setEditorInsertRequest({
         ...(result.cursorOffset === undefined ? {} : { cursorOffset: result.cursorOffset }),
         entryId: activeNote.id,
@@ -9416,7 +9512,6 @@ function UnlockedVaultPage({
       return;
     }
     const id = ++editorRequestIdRef.current;
-    setViewMode("live-preview");
     setEditorRevealRequest({ entryId: activeNote.id, id, line: heading.line });
     if (mobileLayout) {
       setRightOpen(false);
@@ -10020,6 +10115,8 @@ function UnlockedVaultPage({
       const result = await pasteModule.pasteVaultClipboardImages({
         assertAssetDestinationCurrent: (target) => {
           requireCurrentAccessScope();
+          sourceSessionSignal.throwIfAborted();
+          decryptionSession.assertSession(profile.uid, privateKey);
           const runtime = pastedImageFolderRuntimeRef.current;
           if (!runtime) throw new Error("이미지 폴더 상태가 만료되었습니다.");
           runtime.assertTargetCurrent({
@@ -10228,15 +10325,21 @@ function UnlockedVaultPage({
     assertCurrent();
     pendingCreatedEntryIdsRef.current.add(result.noteId);
     setStatus(`원본을 보존하고 '${title}' Markdown 복사본을 만들었습니다.`);
+    if (surface === "wiki") {
+      setWikiOpenDocumentRequest({ id: result.noteId, requestId: ++editorRequestIdRef.current });
+      setActiveCoreTool(null);
+      setFormatSourceEntryId(null);
+    }
   }
 
-  function openCoreTool(tool: VaultCoreToolId) {
+  function openCoreTool(tool: VaultCoreToolId, entryId = activeEntryId) {
     const requiresMarkdown = tool === "footnotes" || tool === "composer" || tool === "slides";
     if (requiresMarkdown && (!activeNote || activeNote.contentFormat !== "markdown-v1" || !activeDraft)) {
       setError("Markdown 노트를 연 뒤 이 Core 도구를 사용해주세요.");
       return;
     }
-    if (tool === "format" && (!activeNote || activeNote.contentFormat !== "legacy-html-v1")) {
+    const formatSource = tool === "format" ? notesRef.current.find((note) => note.id === entryId) : null;
+    if (tool === "format" && (!formatSource || formatSource.contentFormat !== "legacy-html-v1")) {
       setError("기존 HTML 노트를 연 뒤 Format converter를 사용해주세요.");
       return;
     }
@@ -10255,6 +10358,7 @@ function UnlockedVaultPage({
       return;
     }
     setError(null);
+    setFormatSourceEntryId(formatSource?.id ?? null);
     setActiveCoreTool(tool);
   }
 
@@ -10843,6 +10947,19 @@ function UnlockedVaultPage({
   const optimisticFileTreeNotes = useMemo(() => (
     projectOptimisticVaultEntries(notes, optimisticEntryPatches)
   ), [notes, optimisticEntryPatches]);
+  const stableTreeBulkMove = useStableEvent(moveVaultTreeTargets);
+  const stableTreeBulkTrash = useStableEvent(trashVaultTreeTargets);
+  const stableTreeDropEntry = useStableEvent(moveEntryToFolder);
+  const stableTreeDropFolder = useStableEvent(moveFolder);
+  const stableTreeOpenEntry = useStableEvent(openEntry);
+  const stableTreeRenameTarget = useStableEvent(renameVaultTreeTarget);
+  const contextTreeEntry = useCallback((entryId: string, x: number, y: number, returnFocusElement: HTMLButtonElement) => setContextMenu({ returnFocusElement, targetId: entryId, targetKind: "entry", x, y }), []);
+  const contextTreeFolder = useCallback((folderId: string, x: number, y: number, returnFocusElement: HTMLButtonElement) => setContextMenu({ returnFocusElement, targetId: folderId, targetKind: "folder", x, y }), []);
+  const toggleTreeFolder = useCallback((folderId: string) => setExpandedFolderIds((current) => {
+    const next = new Set(current);
+    if (next.has(folderId)) next.delete(folderId); else next.add(folderId);
+    return next;
+  }), []);
   const contextMenuShareNote = contextMenu?.targetKind === "entry"
     ? notes.find((note) => note.id === contextMenu.targetId) ?? null
     : null;
@@ -10853,16 +10970,105 @@ function UnlockedVaultPage({
     && (contextMenuShareNote.entryKind === "markdown" || contextMenuShareNote.entryKind === "legacy-html")
   );
 
-  const wikiPublishFolder = wikiPublishTarget
-    ? folders.find((folder) => folder.id === wikiPublishTarget.folderId && folder.ownerUid === profile.uid && !folder.isDeleted)
-    : null;
+  const wikiAutoPublication = useWikiAutoPublication({
+    uid: profile.uid, signal: decryptionSession.signal,
+    ready: vaultDataReady && vaultPlaintextScopeReady && isOnline,
+    paused: Boolean(wikiPublishTarget), notes, folders,
+    prepare: (selection, signal) => prepareWorkspaceWikiPublication(selection, signal, true)
+  });
+  const wikiPublishFolders = useMemo(() => folders.filter((folder) => folder.ownerUid === profile.uid && !folder.isDeleted && !folder.nameDecryptionFailed)
+    .map((folder) => ({ id: folder.id, label: folderPathsRef.current.get(folder.id) ?? folder.displayName })), [folders, profile.uid]);
+  const wikiPublishNotes = useMemo(() => notes.filter((note) => note.ownerUid === profile.uid && !note.isDeleted && !note.isPurged && (note.entryKind === "markdown" || note.entryKind === "legacy-html"))
+    .map((note) => ({ id: note.id, label: entryPaths.get(note.id) ?? note.title })), [entryPaths, notes, profile.uid]);
   const contextMenuCanPublishWiki = contextMenu?.targetKind === "folder"
     && folders.some((folder) => folder.id === contextMenu.targetId && folder.ownerUid === profile.uid && !folder.isDeleted);
+
+  useModalFocus(rightPanelRef, { enabled: surface === "wiki" && wikiInspectorOpen });
+
+  const wikiReadableNotes = useMemo(() => {
+    if (surface !== "wiki") return [];
+    const next = new Map<string, { note: DecryptedVaultNote; draft?: DraftState; value: WikiReadableNote }>();
+    const projected = notes.filter((note) => note.ownerUid === profile.uid && (note.entryKind === "markdown" || note.entryKind === "legacy-html")).map((note) => {
+      const draft = deferredDrafts[note.id];
+      const existing = wikiProjectedNotesRef.current.get(note.id);
+      const value = existing?.note === note && existing.draft === draft ? existing.value : {
+        id: note.id, body: draft?.body ?? note.body, title: draft?.title ?? note.title,
+        folderId: draft ? draft.folderId : note.folderId, entryKind: note.entryKind, contentFormat: note.contentFormat
+      };
+      next.set(note.id, { note, draft, value });
+      return value;
+    });
+    wikiProjectedNotesRef.current = next;
+    return projected;
+  }, [deferredDrafts, notes, profile.uid, surface]);
+  const wikiReadableFolders = useMemo(() => folders.filter((folder) => folder.ownerUid === profile.uid && !folder.isDeleted), [folders, profile.uid]);
+
+  const stableUpdateEntryDraft = useStableEvent(updateEntryDraft);
+  const stableEditorComposition = useStableEvent(handleEditorComposition);
+  const stablePasteImagesIntoMarkdownEntry = useStableEvent(pasteImagesIntoMarkdownEntry);
+  const stableRenderMarkdownEmbed = useStableEvent(renderMarkdownEmbed);
+  const stableRenderMarkdownCodeBlock = useStableEvent(renderMarkdownCodeBlock);
+  const stableOpenDraftMergeResolver = useStableEvent(openDraftMergeResolver);
+  const stableConvertLegacyNote = useStableEvent(convertLegacyNote);
+  const formatSourceNote = activeCoreTool === "format" && formatSourceEntryId
+    ? noteById.get(formatSourceEntryId)
+    : undefined;
+  // Complex blocks own separate React roots. Refresh their data after callback
+  // refs commit, without recreating editors, selections, history or asset hosts.
+  useLayoutEffect(() => {
+    editorPreviewUpdates.refresh();
+  }, [editorPreviewUpdates, indexEntries, baseMetadataByEntryId, activeEntryId,
+    deletingEntryIds, conflictedEntryIds, pathRewriteBusy]);
+  // Other open documents refresh completion context when activated; typing in
+  // one document must not repaint every mounted editor as its index updates.
+  const wikiEditorDataRef = useRef({ baseMetadataByEntryId, completionNotes, completionTags });
+  wikiEditorDataRef.current = { baseMetadataByEntryId, completionNotes, completionTags };
+  const renderWikiDocument = useCallback((note: WikiReadableNote, entry: VaultIndexEntry, context: WikiDocumentContext) => {
+    const draft = draftsRef.current[note.id];
+    const { baseMetadataByEntryId, completionNotes, completionTags } = wikiEditorDataRef.current;
+    if (note.contentFormat === "legacy-html-v1") return <VaultLegacyNote body={note.body} entryId={note.id} onCreateMarkdownCopy={stableConvertLegacyNote} />;
+    if (!draft) return <VaultViewLoading label="문서" />;
+    const conflicted = conflictedEntryIds.has(note.id);
+    return <div className="wiki-document-editor">
+      {conflicted ? <aside className="vault-save-conflict" role="alert"><div><strong>저장 충돌</strong><p>편집 내용을 보존했습니다. 최신 버전과 안전하게 병합해 주세요.</p></div><button disabled={!isOnline || draftMergeBusyEntryId === note.id} onClick={(event) => void stableOpenDraftMergeResolver(note.id, event.currentTarget)} type="button">안전 병합</button></aside> : null}
+      <VaultMarkdownEditor
+        autoFocus={context.active && !context.collapsed}
+        completionData={{ notes: completionNotes, tags: completionTags, currentNotePath: entry.path,
+          currentBlocks: baseMetadataByEntryId.get(note.id)?.blocks.map((block) => block.id) ?? [], currentHeadings: baseMetadataByEntryId.get(note.id)?.headings.map((heading) => heading.text) ?? [] }}
+        documentKey={`wiki:${note.id}`}
+        sessionStore={editorSessionStore}
+        previewUpdates={editorPreviewUpdates}
+        sessionScopeKey={profile.uid}
+        livePreview
+        onChange={(body) => stableUpdateEntryDraft(note.id, { body })}
+        onCompositionChange={(composing) => stableEditorComposition(note.id, composing)}
+        onLinkClick={context.openLink}
+        onLinkPreviewInteraction={context.onLinkPreviewInteraction}
+        onPasteImages={(files, pasteContext) => stablePasteImagesIntoMarkdownEntry(note.id, files, pasteContext)}
+        onSave={() => void saveEntryRef.current(note.id)}
+        readOnly={!vaultPlaintextScopeReady || deletingEntryIds.has(note.id) || pathRewriteContentLocked || entryCreationContentLocked || conflicted}
+        renderCodeBlock={stableRenderMarkdownCodeBlock}
+        renderEmbed={(reference) => stableRenderMarkdownEmbed(reference, note.id)}
+        searchRequest={editorSearchRequest?.entryId === note.id ? editorSearchRequest : null}
+        onSearchHandled={(id) => setEditorSearchRequest((current) => current?.id === id ? null : current)}
+        revealRequest={editorRevealRequest?.entryId === note.id ? editorRevealRequest : null}
+        onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
+        value={draft.body}
+        valueRevision={draft.baseRevision}
+      />
+    </div>;
+  }, [conflictedEntryIds, deletingEntryIds, draftMergeBusyEntryId,
+    editorRevealRequest, editorSearchRequest, editorSessionStore, editorPreviewUpdates, entryCreationContentLocked, isOnline,
+    pathRewriteContentLocked, profile.uid, stableEditorComposition, stableOpenDraftMergeResolver,
+    stablePasteImagesIntoMarkdownEntry, stableRenderMarkdownCodeBlock, stableRenderMarkdownEmbed,
+    stableUpdateEntryDraft, stableConvertLegacyNote, vaultPlaintextScopeReady]);
+
+  const renderWikiDocumentActions = useCallback((note: WikiReadableNote) => <button aria-label={`${note.title} 문서 메뉴`} aria-haspopup="menu" onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setContextMenu({ targetKind: "entry", targetId: note.id, x: rect.right, y: rect.bottom + 4, returnFocusElement: event.currentTarget }); }} title="문서 메뉴" type="button"><MoreHorizontal size={17} /></button>, []);
 
   return (
     <AppShell onBeforeExit={flushVaultBeforeExit} variant="vault">
       <div
-        className={`vault-workspace${leftOpen ? "" : " vault-left-closed"}${rightOpen ? "" : " vault-right-closed"}`}
+        className={`vault-workspace${surface === "wiki" ? " vault-workspace--wiki" : ""}${leftOpen ? "" : " vault-left-closed"}${rightOpen ? "" : " vault-right-closed"}`}
         data-workspace-sync={workspaceConflict
           ? "conflict"
           : !workspaceReady
@@ -10877,7 +11083,7 @@ function UnlockedVaultPage({
           if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current = true;
         }}
         ref={vaultWorkspaceRef}
-        style={{ "--vault-right-panel-width": `${effectiveRightPanelWidth}px` } as CSSProperties}
+        style={{ "--wiki-available-height": `${wikiWorkspaceHeight}px`, "--vault-right-panel-width": `${effectiveRightPanelWidth}px`, "--vault-left-panel-width": `${effectiveLeftPanelWidth}px` } as CSSProperties}
       >
         {workspaceConflict ? (
           <aside aria-label="워크스페이스 배치 충돌" className="vault-workspace-conflict" role="alert">
@@ -10986,6 +11192,51 @@ function UnlockedVaultPage({
           tabIndex={-1}
           type="file"
         />
+        {surface === "wiki" ? (
+          <Suspense fallback={<VaultViewLoading label="위키" />}>
+            <LazyWikiReader
+              notes={wikiReadableNotes}
+              folders={wikiReadableFolders}
+              mode="private"
+              onBeforeExit={flushVaultBeforeExit}
+              title="나의 위키"
+              homeLink={{ href: "/app", label: "메모" }}
+              preferenceIdentity={profile.uid}
+              sidebarPreference={wikiSidebarPreference}
+              headerActions={<>{wikiHeaderActions}<button aria-label="위키 공개 설정" className="wiki-icon-button" onClick={(event) => setWikiPublishTarget({ folderId: null, returnFocusTo: event.currentTarget })} title={wikiAutoPublication.message || "위키 공개 설정"} type="button"><Globe2 size={17} /></button><span className="wiki-save-state" aria-live="polite" role={error ? "alert" : "status"}>{error ?? activeSaveStatus}</span>{wikiAutoPublication.message ? <span className="wiki-save-state" role="status">{wikiAutoPublication.message}</span> : null}</>}
+              treeActions={<>
+                <button aria-label="새 노트" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown", undefined, undefined, { folderId: null })} title="새 노트" type="button"><FilePlus2 size={17} /></button>
+                <button aria-label="새 폴더" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createFolder(null)} title="새 폴더" type="button"><FolderPlus size={17} /></button>
+              </>}
+              openDocumentRequest={wikiOpenDocumentRequest}
+              onActiveDocumentChange={(id) => {
+                if (id === activeEntryId) return;
+                if (!id) { setActiveTabId(null); return; }
+                wikiReaderActivationRef.current = true;
+                try { openEntry(id); } finally { wikiReaderActivationRef.current = false; }
+              }}
+              beforeCloseDocument={async (id) => {
+                if (composingEntryIdsRef.current.has(id)) { setStatus("입력을 마친 뒤 문서를 닫아주세요."); return false; }
+                await saveEntryRef.current(id);
+                if (draftsRef.current[id]?.dirty) { setStatus("저장을 마치지 못해 문서를 열어 두었습니다."); return false; }
+                return true;
+              }}
+              onHeadingNavigate={(id, rawFragment) => {
+                let fragment = rawFragment;
+                try { fragment = decodeURIComponent(fragment); } catch { /* Keep malformed fragments inert. */ }
+                const lines = (draftsRef.current[id]?.body ?? "").split("\n");
+                const heading = metadataSummaries.find((item) => item.entryId === id)?.headings.find((item) => item.slug === fragment || item.text === fragment);
+                const blockLine = fragment.startsWith("^") ? lines.findIndex((line) => line.trimEnd().endsWith(` ${fragment}`) || line.trim() === fragment) : -1;
+                const line = heading?.line ?? (blockLine >= 0 ? blockLine + 1 : null);
+                if (line !== null) setEditorRevealRequest({ entryId: id, id: ++editorRequestIdRef.current, line });
+              }}
+              onNoteContextMenu={(note, event) => { event.preventDefault(); setContextMenu({ targetKind: "entry", targetId: note.id, x: event.clientX, y: event.clientY, returnFocusElement: event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null }); }}
+              onFolderContextMenu={(folder, event) => { event.preventDefault(); setSelectedFolderId(folder.id); setContextMenu({ targetKind: "folder", targetId: folder.id, x: event.clientX, y: event.clientY, returnFocusElement: event.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null }); }}
+              renderDocument={renderWikiDocument}
+              renderDocumentActions={renderWikiDocumentActions}
+            />
+          </Suspense>
+        ) : <>
         <aside
           aria-hidden={activeMobileDrawer ? true : undefined}
           aria-label="Vault 리본"
@@ -11013,16 +11264,21 @@ function UnlockedVaultPage({
           />
         ) : null}
 
-        {leftOpen ? (
+        {leftOpen || !mobileLayout ? (
           <aside
+            aria-hidden={!leftOpen}
+            inert={!leftOpen}
             aria-label="Vault 탐색기"
             aria-modal={mobileLayout ? true : undefined}
-            className="vault-left-panel"
+            className={`vault-left-panel${leftOpen ? "" : " is-collapsed"}`}
             id="vault-left-panel"
             ref={leftPanelRef}
             role={mobileLayout ? "dialog" : undefined}
             tabIndex={mobileLayout ? -1 : undefined}
           >
+            {!mobileLayout && leftOpen ? <SidebarResizeHandle label="메모 탐색기 너비" controls="vault-left-panel" width={effectiveLeftPanelWidth} minWidth={180} maxWidth={leftPanelMaxWidth}
+              className="vault-left-panel-resizer"
+              onChange={(width) => memoSidebarPreference.onChange({ width, collapsed: false })} /> : null}
             <header>
               <strong>{leftMode === "files" ? "내 메모" : leftMode === "search" ? "검색" : leftMode === "tags" ? "태그" : "북마크"}</strong>
               <button
@@ -11051,32 +11307,16 @@ function UnlockedVaultPage({
                   folders={folders}
                   mutationDisabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked}
                   notes={optimisticFileTreeNotes}
-                  onBulkMove={moveVaultTreeTargets}
-                  onBulkTrash={trashVaultTreeTargets}
-                  onDropEntry={moveEntryToFolder}
-                  onDropFolder={moveFolder}
-                  onContextEntry={(entryId, x, y, returnFocusElement) => setContextMenu({
-                    returnFocusElement,
-                    targetId: entryId,
-                    targetKind: "entry",
-                    x,
-                    y
-                  })}
-                  onContextFolder={(folderId, x, y, returnFocusElement) => setContextMenu({
-                    returnFocusElement,
-                    targetId: folderId,
-                    targetKind: "folder",
-                    x,
-                    y
-                  })}
-                  onOpenEntry={openEntry}
-                  onRenameTarget={renameVaultTreeTarget}
+                  onBulkMove={stableTreeBulkMove}
+                  onBulkTrash={stableTreeBulkTrash}
+                  onDropEntry={stableTreeDropEntry}
+                  onDropFolder={stableTreeDropFolder}
+                  onContextEntry={contextTreeEntry}
+                  onContextFolder={contextTreeFolder}
+                  onOpenEntry={stableTreeOpenEntry}
+                  onRenameTarget={stableTreeRenameTarget}
                   onSelectFolder={setSelectedFolderId}
-                  onToggleFolder={(folderId) => setExpandedFolderIds((current) => {
-                    const next = new Set(current);
-                    if (next.has(folderId)) next.delete(folderId); else next.add(folderId);
-                    return next;
-                  })}
+                  onToggleFolder={toggleTreeFolder}
                   selectedFolderId={selectedFolderId}
                 />
                 <section aria-label="Daily Notes" className={`vault-calendar-pane${calendarOpen ? " open" : ""}`}>
@@ -11175,6 +11415,7 @@ function UnlockedVaultPage({
             <details className="vault-more-tools">
               <summary><Settings2 aria-hidden="true" size={16} /><span>더 보기</span><ChevronDown aria-hidden="true" size={14} /></summary>
               <div className="vault-more-tools-content">
+                <button aria-label="위키 공개 설정" onClick={(event) => setWikiPublishTarget({ folderId: null, returnFocusTo: event.currentTarget })} type="button"><Globe2 aria-hidden="true" size={16} />위키 공개 설정</button>
                 <button aria-label="위키 새 탭에서 읽기" onClick={() => void openWikiInNewTab()} type="button"><BookOpen aria-hidden="true" size={16} />위키 새 탭에서 읽기</button>
                 <button aria-label="태그" onClick={() => showLeftPanel("tags")} type="button"><Tags aria-hidden="true" size={16} />태그 모아 보기</button>
                 <button aria-label="그래프 보기" onClick={openGlobalGraph} type="button"><Network aria-hidden="true" size={16} />메모 연결 보기</button>
@@ -11271,26 +11512,6 @@ function UnlockedVaultPage({
             </div>
             <div className="vault-tab-actions" role="presentation">
               {groupIsActive ? <button aria-label="새 노트 탭" className="vault-new-tab" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button">+</button> : null}
-              {groupIsActive && !mobileLayout ? (
-                <>
-                  <button
-                    aria-label="현재 pane을 좌우로 분할"
-                    className="vault-split-direction"
-                    disabled={entryCreationContentLocked || tabGroups.length >= MAXIMUM_WORKSPACE_PANES || groupActiveTab?.kind !== "entry"}
-                    onClick={() => splitActiveWorkspacePane("vertical")}
-                    title="오른쪽에 새 탭 그룹"
-                    type="button"
-                  ><Columns3 aria-hidden="true" size={16} /></button>
-                  <button
-                    aria-label="현재 pane을 위아래로 분할"
-                    className="vault-split-direction"
-                    disabled={entryCreationContentLocked || tabGroups.length >= MAXIMUM_WORKSPACE_PANES || groupActiveTab?.kind !== "entry"}
-                    onClick={() => splitActiveWorkspacePane("horizontal")}
-                    title="아래에 새 탭 그룹"
-                    type="button"
-                  ><Columns3 aria-hidden="true" size={16} style={{ transform: "rotate(90deg)" }} /></button>
-                </>
-              ) : null}
               {groupIsActive ? <button aria-controls="vault-right-panel" aria-expanded={rightOpen} aria-label={rightOpen ? "오른쪽 패널 닫기" : "오른쪽 패널 열기"} className="vault-right-toggle" onClick={toggleRightPanel} ref={rightPanelToggleRef} type="button"><PanelRight size={17} /></button> : null}
             </div>
           </div>
@@ -11299,6 +11520,9 @@ function UnlockedVaultPage({
             {!groupIsActive ? (
               <InactiveWorkspacePane
                 documentKey={`${groupActiveNote?.id ?? "empty"}:${group.id}`}
+                sessionStore={editorSessionStore}
+                sessionScopeKey={profile.uid}
+                onCompositionChange={(composing) => { if (groupActiveEntryId) handleEditorComposition(groupActiveEntryId, composing); }}
                 draft={groupActiveDraft}
                 groupLabel={groupLabel}
                 note={groupActiveNote}
@@ -11355,67 +11579,18 @@ function UnlockedVaultPage({
                     value={activeDraft.title}
                   />
                   <div className="vault-note-actions">
-                    {activeNote.contentFormat === "markdown-v1" ? (["source", "live-preview", "reading"] as const).map((mode) => (
-                      <button
-                        aria-label={mode === "source" ? "소스 모드" : mode === "live-preview" ? "라이브 프리뷰" : "읽기 보기"}
-                        aria-pressed={viewMode === mode}
-                        key={mode}
-                        onClick={() => setViewMode(mode)}
-                        type="button"
-                      >
-                        {mode === "source" ? "소스" : mode === "live-preview" ? "라이브" : "읽기"}
-                      </button>
-                    )) : null}
-                    {activeNote.contentFormat === "markdown-v1" ? (
-                      <select ref={markdownCopySelectRef} aria-label="Markdown 복사 형식" defaultValue="" onChange={(event) => {
-                        const value = event.currentTarget.value as MarkdownExportProfile;
-                        if (value) void copyCurrent(value);
-                        event.currentTarget.value = "";
-                      }}>
-                        <option value="">복사…</option>
-                        <option value="raw">원본 Markdown</option>
-                        <option value="github">GitHub</option>
-                        <option value="notion">Notion</option>
-                        <option value="discord-ai">Discord · AI</option>
-                      </select>
-                    ) : null}
-                    {activeMarkdownMayContainConvertibleHtml ? (
-                      <button
-                        disabled={entryCreationContentLocked || pathRewriteBusy}
-                        onClick={() => void createNormalizedMarkdownCopy()}
-                        type="button"
-                      >HTML → Markdown 복사</button>
-                    ) : null}
-                    {activeNote.ownerUid === profile.uid
-                      && (activeNote.entryKind === "markdown" || activeNote.entryKind === "legacy-html") ? (
-                      <button
-                        aria-label="노트 공유"
-                        disabled={
-                          deletingEntryIds.has(activeNote.id)
-                          || conflictedEntryIds.has(activeNote.id)
-                          || !isOnline
-                          || pathRewriteBusy
-                          || entryCreationContentLocked
-                        }
-                        onClick={(event) => void openVaultShareManager(activeNote.id, event.currentTarget)}
-                        title="보안 링크와 QuickMemo 사용자 공유"
-                        type="button"
-                      ><Share2 aria-hidden="true" size={16} /></button>
-                    ) : null}
                     <button
-                      aria-label="저장"
-                      disabled={
-                        !activeDraft.dirty
-                        || savingEntryIds.has(activeNote.id)
-                        || conflictedEntryIds.has(activeNote.id)
-                        || !isOnline
-                        || (!vaultNameWritesReady && !activeCanResolveNameCollision)
-                        || entryCreationContentLocked
-                      }
-                      onClick={() => void saveEntry(activeNote.id)}
-                      title={!isOnline ? "온라인 연결 후 저장할 수 있습니다." : conflictedEntryIds.has(activeNote.id) ? "먼저 저장 충돌을 해결해주세요." : "저장"}
+                      aria-label="문서 메뉴"
+                      aria-haspopup="menu"
+                      aria-expanded={contextMenu?.targetKind === "entry" && contextMenu.targetId === activeNote.id}
+                      onClick={(event) => {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setContextMenu({ targetKind: "entry", targetId: activeNote.id, x: rect.right, y: rect.bottom + 4, returnFocusElement: event.currentTarget });
+                      }}
+                      ref={documentMenuButtonRef}
+                      title="문서 메뉴"
                       type="button"
-                    ><Save size={16} /></button>
+                    ><MoreHorizontal aria-hidden="true" size={18} /></button>
                   </div>
                 </header>
                 {conflictedEntryIds.has(activeNote.id) ? (
@@ -11455,13 +11630,7 @@ function UnlockedVaultPage({
                       </div>
                     )
                   ) : activeNote.contentFormat === "legacy-html-v1" ? (
-                    <div className="vault-legacy-note">
-                      <div className="vault-legacy-banner">
-                        <span>기존 HTML 노트 — 원본을 보존하고 있습니다.</span>
-                        <button onClick={() => void convertLegacyNote()} type="button">Markdown 복사본 만들기</button>
-                      </div>
-                      <ReadonlyNoteRenderer as="article" content={activeNote.body} />
-                    </div>
+                    <VaultLegacyNote body={activeNote.body} entryId={activeNote.id} onCreateMarkdownCopy={convertLegacyNote} />
                   ) : (
                     <>
                       <Suspense fallback={<div aria-label="노트 첨부파일" className="vault-note-attachments-inline" role="status">파일 목록 준비 중</div>}>
@@ -11480,59 +11649,39 @@ function UnlockedVaultPage({
                           profile={profile}
                         />
                       </Suspense>
-                      {activeMarkdownPluginView && viewMode !== "source" ? (
+                      {activeMarkdownPluginView ? (
                         <Suspense fallback={<VaultViewLoading label="드로잉" />}>
                           <LazyDrawingView
-                            onChange={(body) => updateActiveDraft({ body })}
-                            readOnly={viewMode === "reading" || deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                            onChange={(body) => updateEntryDraft(activeNote.id, { body })}
+                            readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked || conflictedEntryIds.has(activeNote.id)}
                             source={activeDraft.body}
                           />
                         </Suspense>
-                      ) : viewMode === "reading" ? (
-                        <MarkdownRenderer
-                          className="vault-markdown-renderer"
-                          onLinkClick={handleMarkdownLink}
-                          onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
-                          onTagClick={handleMarkdownTagClick}
-                          renderCodeBlock={renderMarkdownCodeBlock}
-                          renderEmbed={renderMarkdownEmbed}
-                          source={activeDraft.body}
-                        />
-                      ) : viewMode === "live-preview" ? (
-                        <VaultMarkdownEditor
-                          completionData={markdownCompletionData}
-                          documentKey={activeNote.id}
-                          insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
-                          livePreview
-                          onChange={(body) => updateActiveDraft({ body })}
-                          onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
-                          onLinkClick={handleMarkdownLink}
-                          onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
-                          onPasteImages={pasteImagesIntoActiveMarkdown}
-                          onTagClick={handleMarkdownTagClick}
-                          onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
-                          onSave={() => void saveEntry(activeNote.id)}
-                          onSelectionChange={setEditorSelection}
-                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
-                          renderCodeBlock={renderMarkdownCodeBlock}
-                          renderEmbed={renderMarkdownEmbed}
-                          revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
-                          value={activeDraft.body}
-                          valueRevision={activeDraft.baseRevision}
-                        />
                       ) : (
                         <VaultMarkdownEditor
-                          autoFocus
                           completionData={markdownCompletionData}
-                          documentKey={activeNote.id}
+                          autoFocus={!activeMobileDrawer}
+                          documentKey={`${activeNote.id}:${group.id}`}
+                          sessionStore={editorSessionStore}
+                          previewUpdates={editorPreviewUpdates}
+                          sessionScopeKey={profile.uid}
+                          onCompositionChange={(composing) => handleEditorComposition(activeNote.id, composing)}
+                          searchRequest={editorSearchRequest?.entryId === activeNote.id ? editorSearchRequest : null}
+                          onSearchHandled={(id) => setEditorSearchRequest((current) => current?.id === id ? null : current)}
                           insertRequest={editorInsertRequest?.entryId === activeNote.id ? editorInsertRequest : null}
-                          onChange={(body) => updateActiveDraft({ body })}
+                          livePreview
+                          onChange={(body) => updateEntryDraft(activeNote.id, { body })}
                           onInsertHandled={(id) => setEditorInsertRequest((current) => current?.id === id ? null : current)}
+                          onLinkClick={handleMarkdownLink}
+                          onLinkPreviewInteraction={handleMarkdownLinkPreviewInteraction}
                           onPasteImages={pasteImagesIntoActiveMarkdown}
+                          onTagClick={handleMarkdownTagClick}
                           onRevealHandled={(id) => setEditorRevealRequest((current) => current?.id === id ? null : current)}
                           onSave={() => void saveEntry(activeNote.id)}
                           onSelectionChange={setEditorSelection}
-                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked}
+                          readOnly={deletingEntryIds.has(activeNote.id) || pathRewriteContentLocked || entryCreationContentLocked || conflictedEntryIds.has(activeNote.id)}
+                          renderCodeBlock={renderMarkdownCodeBlock}
+                          renderEmbed={renderMarkdownEmbed}
                           revealRequest={editorRevealRequest?.entryId === activeNote.id ? editorRevealRequest : null}
                           value={activeDraft.body}
                           valueRevision={activeDraft.baseRevision}
@@ -11563,22 +11712,26 @@ function UnlockedVaultPage({
               </span>
             ) : null}
             <span aria-live="polite" className="vault-save-state">{activeSaveStatus}</span>
+            {wikiAutoPublication.message ? <span className="vault-publication-state" role="status">{wikiAutoPublication.message}</span> : null}
             <span className="vault-document-stats">{activeDraft ? `${activeDocumentStats.words}단어 · ${activeDocumentStats.characters}자` : ""}</span>
             <span className="vault-link-stats">{activeEntryId ? `백링크 ${backlinks.length} · 나가는 링크 ${outgoing.length}` : `${globalSnapshot.nodes.length} nodes`}</span>
           </footer>
         </main>
 
-        {rightOpen ? (
+        </>}
+        {surface === "wiki" && wikiInspectorOpen ? <button aria-label="문서 정보 닫기" className="vault-wiki-inspector-backdrop" onClick={closeRightPanel} type="button" /> : null}
+        {(surface === "wiki" ? wikiInspectorOpen : rightOpen) ? (
           <aside
             aria-label="연결 정보"
-            aria-modal={mobileLayout ? true : undefined}
-            className="vault-right-panel"
+            aria-modal={surface === "wiki" || mobileLayout ? true : undefined}
+            className={`vault-right-panel${surface === "wiki" ? " vault-wiki-inspector" : ""}`}
             id="vault-right-panel"
             ref={rightPanelRef}
-            role={mobileLayout ? "dialog" : undefined}
-            tabIndex={mobileLayout ? -1 : undefined}
+            role={surface === "wiki" || mobileLayout ? "dialog" : undefined}
+            tabIndex={surface === "wiki" || mobileLayout ? -1 : undefined}
+            onKeyDown={(event) => { if (surface === "wiki" && event.key === "Escape") { event.preventDefault(); closeRightPanel(); } }}
           >
-            {!mobileLayout ? (
+            {!mobileLayout && surface === "memo" ? (
               <div
                 aria-controls="vault-right-panel"
                 aria-label="오른쪽 패널 너비 조절"
@@ -11765,9 +11918,13 @@ function UnlockedVaultPage({
               role="menu"
               style={{
                 left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)),
-                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenuCanShare || contextMenuCanPublishWiki ? 210 : 160)))
+                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenu.targetKind === "entry" ? Math.min(620, window.innerHeight - 16) : contextMenuCanPublishWiki ? 210 : 160)))
               }}
             >
+              {contextMenu.targetKind === "folder" ? <>
+                <button disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => { const folderId = contextMenu.targetId; closeContextMenu(); void createEntry("markdown", undefined, undefined, { folderId }); }} role="menuitem" type="button"><FilePlus2 size={14} />이 폴더에 새 노트</button>
+                <button disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => { const folderId = contextMenu.targetId; closeContextMenu(); void createFolder(folderId); }} role="menuitem" type="button"><FolderPlus size={14} />하위 폴더 만들기</button>
+              </> : null}
               <button autoFocus onClick={() => {
                 const target = contextMenu;
                 closeContextMenu();
@@ -11787,6 +11944,52 @@ function UnlockedVaultPage({
               }} role="menuitem" type="button">
                 <FolderInput size={14} /> 이동…
               </button>
+              {contextMenu.targetKind === "entry" ? <>
+                {contextMenuShareNote?.contentFormat === "markdown-v1" ? <button onClick={() => {
+                  const id = contextMenu.targetId;
+                  closeContextMenu();
+                  openEntry(id);
+                  setEditorSearchRequest({ entryId: id, id: ++editorRequestIdRef.current });
+                }} role="menuitem" type="button"><Search size={14} />문서 내 검색</button> : null}
+                <button onClick={() => {
+                  const id = contextMenu.targetId;
+                  closeContextMenu();
+                  void navigator.clipboard.writeText(`${window.location.origin}/${surface === "wiki" ? "wiki?note" : "app?entry"}=${encodeURIComponent(id)}`)
+                    .then(() => setStatus("문서 링크를 복사했습니다."), () => setError("문서 링크를 복사하지 못했습니다."));
+                }} role="menuitem" type="button"><Link2 size={14} />문서 링크 복사</button>
+                {notesRef.current.find((note) => note.id === contextMenu.targetId)?.contentFormat === "markdown-v1" ? <>
+                  <button disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => {
+                    const draft = draftsRef.current[contextMenu.targetId];
+                    closeContextMenu();
+                    if (draft) void createEntry("markdown", `${draft.title} 복사본`, draft.body, { folderId: draft.folderId });
+                  }} role="menuitem" type="button"><Files size={14} />문서 복제</button>
+                  {([['raw', 'Markdown 원본 복사'], ['github', 'GitHub 형식 복사'], ['notion', 'Notion 형식 복사'], ['discord-ai', 'Discord · AI 형식 복사']] as const).map(([profileName, label]) => (
+                    <button key={profileName} onClick={() => {
+                      const id = contextMenu.targetId;
+                      closeContextMenu();
+                      void copyCurrent(profileName, id);
+                    }} role="menuitem" type="button"><FileCode2 size={14} />{label}</button>
+                  ))}
+                  <button disabled={!draftsRef.current[contextMenu.targetId]?.dirty || savingEntryIds.has(contextMenu.targetId) || conflictedEntryIds.has(contextMenu.targetId) || !isOnline || (!vaultNameWritesReady && !(contextMenu.targetId === activeEntryId && activeCanResolveNameCollision)) || entryCreationContentLocked} onClick={() => {
+                    const id = contextMenu.targetId;
+                    closeContextMenu();
+                    void saveEntry(id);
+                  }} role="menuitem" type="button"><Save size={14} />저장</button>
+                </> : null}
+                {(['properties', 'history', 'backlinks'] as const).map((mode) => (
+                  <button key={mode} onClick={() => {
+                    const id = contextMenu.targetId;
+                    closeContextMenu();
+                    openEntry(id);
+                    showRightPanel(mode);
+                  }} role="menuitem" type="button"><ListTree size={14} />{mode === 'properties' ? '문서 정보' : mode === 'history' ? '버전 기록' : '백링크'}</button>
+                ))}
+                {surface === "memo" && !mobileLayout && contextMenu.targetId === activeEntryId ? <>
+                  <button disabled={entryCreationContentLocked || tabGroups.length >= MAXIMUM_WORKSPACE_PANES} onClick={() => { closeContextMenu(); splitActiveWorkspacePane("vertical"); }} role="menuitem" type="button"><Columns3 size={14} />좌우 분할</button>
+                  <button disabled={entryCreationContentLocked || tabGroups.length >= MAXIMUM_WORKSPACE_PANES} onClick={() => { closeContextMenu(); splitActiveWorkspacePane("horizontal"); }} role="menuitem" type="button"><Columns3 size={14} />위아래 분할</button>
+                </> : null}
+                {contextMenu.targetId === activeEntryId && activeMarkdownMayContainConvertibleHtml ? <button disabled={entryCreationContentLocked || pathRewriteBusy} onClick={() => { closeContextMenu(); void createNormalizedMarkdownCopy(); }} role="menuitem" type="button"><FileCode2 size={14} />HTML → Markdown 복사</button> : null}
+              </> : null}
               {contextMenuCanShare ? (
                 <button onClick={() => {
                   const target = contextMenu;
@@ -11821,13 +12024,15 @@ function UnlockedVaultPage({
             </div>
           </div>
         ) : null}
-        {wikiPublishTarget && wikiPublishFolder ? <Suspense fallback={<VaultViewLoading label="위키 공개 설정" />}>
+        {wikiPublishTarget ? <Suspense fallback={<VaultViewLoading label="위키 공개 설정" />}>
           <LazyWikiPublishDialog
-            folderName={wikiPublishFolder.displayName}
+            folders={wikiPublishFolders}
+            notes={wikiPublishNotes}
             rootFolderId={wikiPublishTarget.folderId}
             uid={profile.uid}
             sessionSignal={decryptionSession.signal}
-            prepare={(signal) => prepareFolderWikiPublication(wikiPublishTarget.folderId, signal)}
+            prepare={(selection, signal) => prepareWorkspaceWikiPublication(selection, signal)}
+            onPublicationChange={wikiAutoPublication.updateStatus}
             onClose={() => setWikiPublishTarget(null)}
             returnFocusTo={wikiPublishTarget.returnFocusTo}
           />
@@ -12012,7 +12217,7 @@ function UnlockedVaultPage({
             <LazyMarkdownMessageBatchDialog
               delivery={discordMessageBatch}
               onClose={() => setDiscordMessageBatch(null)}
-              returnFocusTo={markdownCopySelectRef.current}
+              returnFocusTo={documentMenuButtonRef.current}
             />
           </Suspense>
         </FeatureErrorBoundary>
@@ -12105,8 +12310,7 @@ function UnlockedVaultPage({
                 <LazyVaultFootnotesView
                   onNavigate={(footnote) => {
                     if (footnote.definitionLine === null) return;
-                    setViewMode("live-preview");
-                    setEditorRevealRequest({
+                                  setEditorRevealRequest({
                       entryId: activeNote.id,
                       id: Date.now(),
                       line: footnote.definitionLine
@@ -12115,16 +12319,16 @@ function UnlockedVaultPage({
                   }}
                   source={activeDraft.body}
                 />
-              ) : activeCoreTool === "format" && activeNote?.contentFormat === "legacy-html-v1" ? (
+              ) : activeCoreTool === "format" && formatSourceNote?.contentFormat === "legacy-html-v1" ? (
                 <LazyVaultFormatConverter
                   onCreateMarkdownCopy={createConvertedMarkdownCopy}
                   source={{
-                    body: activeNote.body,
+                    body: formatSourceNote.body,
                     contentFormat: "legacy-html-v1",
-                    folderId: activeNote.folderId ?? null,
-                    id: activeNote.id,
-                    revision: activeNote.revision ?? 0,
-                    title: activeNote.title
+                    folderId: formatSourceNote.folderId ?? null,
+                    id: formatSourceNote.id,
+                    revision: formatSourceNote.revision ?? 0,
+                    title: formatSourceNote.title
                   }}
                 />
               ) : activeCoreTool === "composer" && activeComposerEntry ? (
@@ -12162,7 +12366,13 @@ function UnlockedVaultPage({
  * unmounts every decrypted state container at once. Late async continuations
  * can no longer repopulate plaintext after the security boundary is closed.
  */
-export default function VaultPage() {
+export interface VaultPageProps {
+  surface?: "memo" | "wiki";
+  wikiHeaderActions?: ReactNode;
+  wikiSidebarPreference?: ControlledSidebarPreference;
+}
+
+export default function VaultPage(props: VaultPageProps = {}) {
   const { firebaseUser, privateKey, profile } = useAuth();
   const decryptionSession = useVaultDecryptionSession();
   const profileUid = profile?.uid;
@@ -12173,7 +12383,7 @@ export default function VaultPage() {
     return firebaseUser.getIdToken();
   }, [firebaseUser, profileUid]);
 
-  if (!profile || !firebaseUser || firebaseUser.uid !== profile.uid) {
+  if (!profile || !firebaseUser || firebaseUser.uid !== profile.uid || !profile.isActive || !hasFeatureAccess(profile, "notes")) {
     return null;
   }
   if (!privateKey) {
@@ -12182,7 +12392,7 @@ export default function VaultPage() {
   if (!decryptionSession) {
     return <AppShell variant="vault"><div className="page-center" role="status">메모를 준비하는 중…</div></AppShell>;
   }
-  return <UnlockedVaultPage decryptionSession={decryptionSession} getIdToken={getIdToken} privateKey={privateKey} profile={profile} />;
+  return <UnlockedVaultPage {...props} decryptionSession={decryptionSession} getIdToken={getIdToken} privateKey={privateKey} profile={profile} />;
 }
 
 interface VaultTagTreeNode {
@@ -12327,7 +12537,7 @@ function VaultTagList({
   );
 }
 
-export function VaultFileTree({
+export const VaultFileTree = memo(function VaultFileTree({
   expandedFolderIds,
   folders,
   mutationDisabled,
@@ -12803,4 +13013,4 @@ export function VaultFileTree({
       ) : null}
     </section>
   );
-}
+});

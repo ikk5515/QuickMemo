@@ -38,6 +38,11 @@ export interface VaultEntryDraft extends MarkdownNoteDraft {
   vaultPasteLockId?: string;
 }
 
+export type VaultEntryCreationOptions = {
+  signal?: AbortSignal;
+  assertCurrent?: () => void;
+} & ({ targetId: string; importJobId: string } | { targetId?: never; importJobId?: never });
+
 export interface VaultAssetDraft {
   bytes: Uint8Array;
   folderId: string | null;
@@ -141,8 +146,10 @@ export async function createEncryptedVaultEntry(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
   vaultIntegrityKey: CryptoKey,
   draft: VaultEntryDraft,
-  options?: { targetId: string; importJobId: string }
+  options?: VaultEntryCreationOptions
 ) {
+  const assertCurrent = () => { options?.signal?.throwIfAborted(); options?.assertCurrent?.(); };
+  assertCurrent();
   const normalized = validateDraft(draft, draft.contentFormat, draft.entryKind);
   const [claimId, noteKey] = await Promise.all([vaultNameFingerprint(vaultIntegrityKey, {
     kind: draft.entryKind,
@@ -150,6 +157,7 @@ export async function createEncryptedVaultEntry(
     parentId: normalized.folderId,
     targetType: "entry"
   }), generateNoteKey()]);
+  assertCurrent();
   const [encryptedTitle, encryptedBody, wrappedKey, historySummaryPayload, historySnapshot] = await Promise.all([
     encryptText(normalized.title, noteKey),
     encryptText(normalized.body, noteKey),
@@ -183,16 +191,21 @@ export async function createEncryptedVaultEntry(
       : {}),
     wrappedKeys: { [profile.uid]: wrappedKey }
   };
-  return options?.targetId
-    ? createRevisionedEncryptedNoteAtId(createInput, options.targetId, options.importJobId)
-    : createRevisionedEncryptedNote(createInput);
+  assertCurrent();
+  // Keep an already-dispatched create receipt available for clipboard rollback;
+  // cancellation only prevents new work before the irreversible request begins.
+  const guard = options?.signal || options?.assertCurrent ? assertCurrent : undefined;
+  if (options?.targetId) return guard
+    ? createRevisionedEncryptedNoteAtId(createInput, options.targetId, options.importJobId, guard)
+    : createRevisionedEncryptedNoteAtId(createInput, options.targetId, options.importJobId);
+  return guard ? createRevisionedEncryptedNote(createInput, guard) : createRevisionedEncryptedNote(createInput);
 }
 
 export async function createEncryptedVaultAsset(
   profile: Pick<UserProfile, "publicKeyJwk" | "uid">,
   vaultIntegrityKey: CryptoKey,
   draft: VaultAssetDraft,
-  options?: { targetId: string; importJobId: string }
+  options?: VaultEntryCreationOptions
 ) {
   return createEncryptedVaultEntry(profile, vaultIntegrityKey, {
     body: encodeVaultAsset(draft.bytes, draft.mimeType),

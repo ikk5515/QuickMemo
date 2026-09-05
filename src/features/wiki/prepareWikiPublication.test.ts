@@ -35,6 +35,42 @@ function validPng() {
 }
 
 describe("prepareWikiPublication", () => {
+  it("projects multiple selected folders and individual root notes into one workspace without private ancestors", () => {
+    const source = [note("start", "root", "Start", "[[PrivateAncestor/Confidential/Other]]\n[[Root]]"),
+      note("other", "outside", "Other", "[[PrivateAncestor/Public/Start]]"), note("top", null, "Root", "# Root"),
+      note("private", "private-parent", "Secret", "private plaintext")];
+    const result = prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", title: "Shared knowledge", selection: { folderIds: ["root", "sub", "outside"], noteIds: ["top"] }, notes: source, folders });
+    expect(result.manifest.rootFolderId).toBeNull();
+    expect(result.manifest.selection).toEqual({ folderIds: ["root", "outside"], noteIds: ["top"] });
+    expect(result.manifest.entries.map(entry => entry.sourceNoteId)).toEqual(["start", "other", "top"]);
+    expect(result.manifest.entries.find(entry => entry.sourceNoteId === "top")).toMatchObject({ sourceFolderId: null, parentSourceFolderId: null });
+    expect(result.contents[0].body).toContain("[[Confidential/Other.md|Other]]");
+    expect(result.contents[0].body).toContain("[[Root.md|Root]]");
+    expect(JSON.stringify(result)).not.toMatch(/PrivateAncestor|private plaintext/);
+  });
+
+  it("automatically includes newly added descendants under the same selected root", () => {
+    const selection = { folderIds: ["root"], noteIds: [] };
+    const initial = prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection, notes: [], folders });
+    const extended = prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection, notes: [note("new", "new-folder", "Pod", "new knowledge")], folders: [...folders, folder("new-folder", "Kubernetes", "sub")] });
+    expect(extended.manifest.selection).toEqual(initial.manifest.selection);
+    expect(extended.manifest.entries).toHaveLength(1);
+    expect(extended.manifest.folders.find(row => row.sourceFolderId === "new-folder")?.parentSourceFolderId).toBe("sub");
+  });
+
+  it("publishes an individually selected note without revealing or publishing its private parent", () => {
+    const result = prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection: { folderIds: [], noteIds: ["one"] },
+      notes: [note("one", "private-parent", "One", "[[PrivateAncestor/Hidden]]"), note("hidden", "private-parent", "Hidden", "hidden body")], folders });
+    expect(result.manifest.folders).toEqual([]);
+    expect(result.manifest.entries).toEqual([expect.objectContaining({ sourceNoteId: "one", sourceFolderId: "private-parent", parentSourceFolderId: null })]);
+    expect(result.contents).toEqual([{ sourceNoteId: "one", body: "[비공개 링크]" }]);
+  });
+
+  it("rejects explicit selections owned by another account", () => {
+    expect(() => prepareWikiPublication({ rootFolderId: null, ownerUid: "other", selection: { folderIds: ["root"], noteIds: [] }, notes: [], folders })).toThrow(/권한/);
+    expect(() => prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection: { folderIds: [], noteIds: ["foreign"] }, notes: [note("foreign", null, "Foreign", "secret", { ownerUid: "other" })], folders })).toThrow(/권한/);
+  });
+
   it("copies only the selected active owner subtree without modifying encrypted or decrypted inputs", () => {
     const sources = [
       note("home", "root", "Home", "# Hello"),

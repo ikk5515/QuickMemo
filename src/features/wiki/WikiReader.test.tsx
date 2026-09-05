@@ -1,8 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { WikiReader, type WikiReaderProps } from "./WikiReader";
 import type { WikiReadableNote } from "./wikiModel";
+
+beforeEach(() => localStorage.clear());
 
 const notes: WikiReadableNote[] = [
   { id: "overview", title: "개요", body: "## 시작\n\n개요 본문\n\n### 자세히\n\n[[연결 문서]]\n\n[[비공개 문서]]", entryKind: "markdown", contentFormat: "markdown-v1" },
@@ -12,12 +14,12 @@ const notes: WikiReadableNote[] = [
 const folders: WikiReaderProps["folders"] = [];
 function NavigationState() {
   const location = useLocation(); const navigate = useNavigate();
-  return <><output data-testid="wiki-location">{location.pathname + location.search}</output><button onClick={() => navigate(-1)} type="button">브라우저 뒤로</button></>;
+  return <><output data-testid="wiki-location">{location.pathname + location.search}</output><output data-testid="wiki-history">{JSON.stringify(location.state)}</output><button onClick={() => navigate(-1)} type="button">브라우저 뒤로</button></>;
 }
 function Reader({ data = notes, loadingNoteIds }: { data?: WikiReadableNote[]; loadingNoteIds?: ReadonlySet<string> }) {
   return <><WikiReader basePath="/wiki/public/published" folders={folders} loadingNoteIds={loadingNoteIds} mode="public" notes={data} title="공개 지식" /><NavigationState /></>;
 }
-function renderReader(path = "/wiki/public/published?note=overview", data = notes) {
+function renderReader(path = "/wiki/public/published?page=%EA%B0%9C%EC%9A%94.md", data = notes) {
   return render(<MemoryRouter initialEntries={[path]}><Reader data={data} /></MemoryRouter>);
 }
 async function ready() { await screen.findByRole("list", { name: "그래프 노드" }); }
@@ -92,11 +94,11 @@ describe("authorized WikiReader projection and reading panels", () => {
 
   it("uses a leading Markdown H1 as the only article title while retaining the filename label", async () => {
     const data = [{ ...notes[0], title: "저장된 파일 이름", body: "# 실제 문서 제목\n\n## 본문 제목\n내용" }];
-    const { container } = renderReader(undefined, data);
+    const { container } = renderReader("/wiki/public/published", data);
     expect(screen.getByRole("article", { name: "저장된 파일 이름" })).toBeInTheDocument();
     expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "실제 문서 제목", level: 1 })).toHaveClass("wiki-title");
-    expect(container.querySelector(".wiki-breadcrumb")).toHaveTextContent("저장된 파일 이름");
+    expect(container.querySelector(".wiki-panel-document-title")).toHaveTextContent("저장된 파일 이름");
     await ready();
   });
 
@@ -123,11 +125,13 @@ describe("authorized WikiReader projection and reading panels", () => {
     const original = screen.getByRole("article", { name: "개요" });
     original.scrollTop = 380;
     fireEvent.click(within(original).getByRole("button", { name: "연결 문서" }));
-    expect(screen.getByRole("article", { name: "개요" })).toBe(original);
+    expect(original).toBeInTheDocument();
+    expect(original).toHaveAttribute("inert");
     expect(original.scrollTop).toBe(380);
     const linked = screen.getByRole("article", { name: "연결 문서" });
     expect(linked).toHaveAttribute("data-active", "true");
-    expect(screen.getByTestId("wiki-location")).toHaveTextContent("?note=linked&pane=overview");
+    expect(new URLSearchParams(screen.getByTestId("wiki-location").textContent!.split("?")[1]).get("page")).toBe("연결 문서.md");
+    expect(screen.getByTestId("wiki-location")).not.toHaveTextContent("overview");
     await waitFor(() => expect(within(screen.getByRole("navigation", { name: "현재 메모 목차" })).getByRole("button", { name: "참고" })).toBeVisible());
     fireEvent.keyDown(linked, { key: "Escape" });
     expect(screen.queryByRole("article", { name: "연결 문서" })).not.toBeInTheDocument();
@@ -135,64 +139,38 @@ describe("authorized WikiReader projection and reading panels", () => {
     expect(original.scrollTop).toBe(380);
   });
 
-  it("uses browser history to restore the previous panel and sidebar selection replaces the stack", async () => {
-    renderReader(); await ready();
+  it("uses browser history to restore the previous workspace and appends sidebar selections", async () => {
+    const { container } = renderReader(); await ready();
     fireEvent.click(within(screen.getByRole("article", { name: "개요" })).getByRole("button", { name: "연결 문서" }));
     await waitFor(() => expect(within(screen.getByRole("navigation", { name: "현재 메모 목차" })).getByRole("button", { name: "참고" })).toBeInTheDocument());
     const linked = screen.getByRole("article", { name: "연결 문서" }); linked.scrollTop = 120;
     fireEvent.click(within(linked).getByRole("button", { name: "세 번째 문서" }));
-    expect(screen.getAllByRole("article")).toHaveLength(3);
+    expect(container.querySelectorAll(".wiki-panel")).toHaveLength(3);
     fireEvent.click(screen.getByRole("button", { name: "브라우저 뒤로" }));
-    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(container.querySelectorAll(".wiki-panel")).toHaveLength(2);
     expect(screen.getByRole("article", { name: "연결 문서" })).toBe(linked);
     expect(linked.scrollTop).toBe(120);
     fireEvent.click(within(screen.getByRole("navigation", { name: "위키 폴더와 메모" })).getByRole("link", { name: "세 번째 문서" }));
-    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(container.querySelectorAll(".wiki-panel")).toHaveLength(3);
     expect(screen.getByRole("article", { name: "세 번째 문서" })).toBeInTheDocument();
   });
 
-  it("reveals keyboard-focused earlier panels while retaining every page and its reading position", async () => {
-    renderReader(); await ready();
+  it("activates preceding and following title strips without losing their DOM or scrolling", async () => {
+    const { container } = renderReader(); await ready();
     const original = screen.getByRole("article", { name: "개요" }); original.scrollTop = 380;
     fireEvent.click(within(original).getByRole("button", { name: "연결 문서" }));
-    const linked = screen.getByRole("article", { name: "연결 문서" });
-    await waitFor(() => expect(linked).toHaveFocus());
-    linked.scrollTop = 120;
-    fireEvent.click(within(linked).getByRole("button", { name: "세 번째 문서" }));
-    const latest = screen.getByRole("article", { name: "세 번째 문서" });
-    await waitFor(() => expect(latest).toHaveFocus());
-    const earlierLink = within(linked).getByRole("button", { name: "세 번째 문서" });
-    act(() => earlierLink.focus());
-    expect(earlierLink).toHaveFocus();
-    expect(linked).toHaveAttribute("data-active", "true");
-    expect(latest).toHaveAttribute("data-active", "false");
+    const linked = screen.getByRole("article", { name: "연결 문서" }); linked.scrollTop = 120;
     await waitFor(() => expect(within(screen.getByRole("navigation", { name: "현재 메모 목차" })).getByRole("button", { name: "참고" })).toBeInTheDocument());
-    act(() => { window.dispatchEvent(new Event("resize")); latest.focus({ preventScroll: true }); });
-    expect(latest).toHaveAttribute("data-active", "true");
+    fireEvent.click(within(linked).getByRole("button", { name: "세 번째 문서" }));
+    fireEvent.click(screen.getByRole("button", { name: "개요 문서 펼치기" }));
     expect(screen.getByRole("article", { name: "개요" })).toBe(original);
-    expect(screen.getByRole("article", { name: "연결 문서" })).toBe(linked);
-    expect(original.scrollTop).toBe(380);
-    expect(linked.scrollTop).toBe(120);
-  });
-
-  it("returns to an existing last panel when its link is opened again from an earlier page", async () => {
-    renderReader(); await ready();
-    const original = screen.getByRole("article", { name: "개요" });
-    const link = within(original).getByRole("button", { name: "연결 문서" });
-    fireEvent.click(link);
-    const linked = screen.getByRole("article", { name: "연결 문서" });
+    expect(linked).toHaveAttribute("inert");
+    expect(original.scrollTop).toBe(380); expect(linked.scrollTop).toBe(120);
+    fireEvent.click(within(original).getByRole("button", { name: "연결 문서" }));
     await waitFor(() => expect(linked).toHaveFocus());
-    linked.scrollTop = 120;
-    const unchangedUrl = screen.getByTestId("wiki-location").textContent;
-    act(() => link.focus());
-    expect(original).toHaveAttribute("data-active", "true");
-    fireEvent.click(link);
-    await waitFor(() => expect(linked).toHaveFocus());
-    expect(linked).toHaveAttribute("data-active", "true");
-    expect(original).toHaveAttribute("data-active", "false");
-    expect(screen.getByTestId("wiki-location").textContent).toBe(unchangedUrl);
-    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(container.querySelectorAll(".wiki-panel")).toHaveLength(3);
     expect(linked.scrollTop).toBe(120);
+    expect(container.querySelectorAll(".wiki-document-slot")[2]).toHaveAttribute("data-note-id", "third");
   });
 
   it("does not expose private controls or resolve notes outside the supplied public subset", async () => {
@@ -227,12 +205,12 @@ describe("authorized WikiReader projection and reading panels", () => {
 
   it("shows pending body status while preserving the article and search during background loading", async () => {
     const pending = new Set(["overview"]);
-    const view = render(<MemoryRouter initialEntries={["/wiki/public/published?note=overview"]}><Reader loadingNoteIds={pending} /></MemoryRouter>);
+    const view = render(<MemoryRouter initialEntries={["/wiki/public/published?page=%EA%B0%9C%EC%9A%94.md"]}><Reader loadingNoteIds={pending} /></MemoryRouter>);
     expect(screen.getByText("본문을 불러오고 있습니다…")).toHaveAttribute("role", "status");
     expect(screen.queryByText("개요 본문")).not.toBeInTheDocument();
     const article = screen.getByRole("article", { name: "개요" }); article.scrollTop = 80;
     fireEvent.change(screen.getByRole("searchbox", { name: "위키 검색" }), { target: { value: "참고" } });
-    view.rerender(<MemoryRouter initialEntries={["/wiki/public/published?note=overview"]}><Reader /></MemoryRouter>);
+    view.rerender(<MemoryRouter initialEntries={["/wiki/public/published?page=%EA%B0%9C%EC%9A%94.md"]}><Reader /></MemoryRouter>);
     expect(screen.getByRole("article", { name: "개요" })).toBe(article);
     expect(article.scrollTop).toBe(80);
     expect(screen.getByRole("searchbox", { name: "위키 검색" })).toHaveValue("참고");
@@ -240,14 +218,31 @@ describe("authorized WikiReader projection and reading panels", () => {
     await act(async () => undefined);
   });
 
-  it("renders at most six URL panels and immediately removes vanished notes from the reading stack", async () => {
+  it("keeps more than six open documents and immediately removes revoked document DOM", async () => {
     const many: WikiReadableNote[] = Array.from({ length: 9 }, (_, index) => ({ id: "n" + index, title: "문서" + index, body: "본문" + index, entryKind: "markdown", contentFormat: "markdown-v1" }));
-    const path = "/wiki/public/published?note=n8&pane=n0&pane=n1&pane=n2&pane=n3&pane=n4&pane=n5&pane=n6";
+    const path = "/wiki/public/published";
     const view = renderReader(path, many);
-    expect(screen.getAllByRole("article")).toHaveLength(6);
+    const tree = screen.getByRole("navigation", { name: "위키 폴더와 메모" });
+    many.slice(1).forEach((note) => fireEvent.click(within(tree).getByRole("link", { name: note.title })));
+    expect(view.container.querySelectorAll(".wiki-panel")).toHaveLength(9);
     view.rerender(<MemoryRouter initialEntries={[path]}><Reader data={many.filter((note) => note.id === "n0")} /></MemoryRouter>);
-    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(view.container.querySelectorAll(".wiki-panel")).toHaveLength(1);
     expect(screen.queryByText("본문4")).not.toBeInTheDocument();
     await act(async () => undefined);
+  });
+
+  it.each(["overview", "linked", "third"])("closes only %s while preserving the other open document instances", async (id) => {
+    const { container } = renderReader(); await ready();
+    const tree = screen.getByRole("navigation", { name: "위키 폴더와 메모" });
+    fireEvent.click(within(tree).getByRole("link", { name: "연결 문서" }));
+    fireEvent.click(within(tree).getByRole("link", { name: "세 번째 문서" }));
+    const instances = new Map([...container.querySelectorAll<HTMLElement>(".wiki-panel")].map((element) => [element.dataset.noteId!, element]));
+    instances.forEach((article) => { article.scrollTop = 125; });
+    fireEvent.click(screen.getByRole("button", { name: notes.find((note) => note.id === id)!.title + " 문서 닫기" }));
+    await waitFor(() => expect(container.querySelectorAll(".wiki-panel")).toHaveLength(2));
+    for (const [otherId, article] of instances) {
+      if (otherId === id) expect(article).not.toBeInTheDocument();
+      else { expect(article).toBeInTheDocument(); expect(article.scrollTop).toBe(125); }
+    }
   });
 });

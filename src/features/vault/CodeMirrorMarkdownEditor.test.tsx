@@ -1,10 +1,144 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { memo, useCallback, useLayoutEffect, useRef } from "react";
+import { undo, redo } from "@codemirror/commands";
+import { Transaction } from "@codemirror/state";
+import { MarkdownEditorSessionStore } from "./markdownEditorSession";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
 import { VAULT_MARKDOWN_IMAGE_ACCEPT } from "./clipboardImagePaste";
 import { CodeMirrorMarkdownEditor } from "./CodeMirrorMarkdownEditor";
+import { LivePreviewUpdates } from "./livePreviewUpdates";
+import { DataviewBlock } from "../dataview/DataviewBlock";
+import type { ParsedMarkdownMetadata, VaultIndexEntry } from "../knowledge";
 
 describe("CodeMirrorMarkdownEditor", () => {
+  it.each([
+    ["한글", ["ㅎ", "하", "한", "한글"]],
+    ["日本語", ["に", "にほ", "にほん", "日本語"]]
+  ] as const)("commits %s composition once and defers explicit save until the final text", async (finalText, stages) => {
+    const onChange = vi.fn();
+    const onSave = vi.fn();
+    const onCompositionChange = vi.fn();
+    render(<CodeMirrorMarkdownEditor livePreview onChange={onChange} onCompositionChange={onCompositionChange} onSave={onSave} value="" />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const cm = EditorView.findFromDOM(editor)!;
+    fireEvent.compositionStart(editor);
+    for (const text of stages) act(() => cm.dispatch({
+      changes: { from: 0, to: cm.state.doc.length, insert: text },
+      annotations: Transaction.userEvent.of("input.type.compose")
+    }));
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+    expect(onSave).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.compositionEnd(editor, { data: finalText }); await Promise.resolve(); });
+    await waitFor(() => expect(onChange).toHaveBeenCalledExactlyOnceWith(finalText));
+    expect(onSave).toHaveBeenCalledOnce();
+    expect(onCompositionChange.mock.calls).toEqual([[true], [false]]);
+    act(() => { undo(cm); });
+    expect(cm.state.doc.toString()).toBe("");
+    act(() => { redo(cm); });
+    expect(cm.state.doc.toString()).toBe(finalText);
+  });
+
+  it("retains independent draft text, undo, selection and scroll after a failed save and document switches", async () => {
+    const store = new MarkdownEditorSessionStore("owner");
+    const drafts = new Map([["a", "Alpha"], ["b", "Beta"]]);
+    const onSave = vi.fn(async () => { throw new Error("offline"); });
+    const props = (id: string) => ({ documentKey: id, sessionStore: store, sessionScopeKey: "owner", value: drafts.get(id)!, onChange: (body: string) => drafts.set(id, body), onSave: () => { void onSave().catch(() => undefined); } });
+    const view = render(<CodeMirrorMarkdownEditor {...props("a")} />);
+    const first = EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!;
+    act(() => first.dispatch({ changes: { from: 5, insert: " edited" }, selection: { anchor: 8 }, annotations: Transaction.userEvent.of("input.type") }));
+    first.scrollDOM.scrollTop = 180;
+    fireEvent.keyDown(first.contentDOM, { key: "s", ctrlKey: true });
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(<CodeMirrorMarkdownEditor {...props("b")} />);
+    const second = EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!;
+    act(() => second.dispatch({ changes: { from: 4, insert: " other" }, annotations: Transaction.userEvent.of("input.type") }));
+    view.rerender(<CodeMirrorMarkdownEditor {...props("a")} />);
+    const restored = EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!;
+    expect(restored.state.doc.toString()).toBe("Alpha edited");
+    expect(restored.state.selection.main.head).toBe(8);
+    expect(restored.scrollDOM.scrollTop).toBe(180);
+    expect(drafts.get("b")).toBe("Beta other");
+    act(() => { undo(restored); });
+    expect(restored.state.doc.toString()).toBe("Alpha");
+    expect(onSave).toHaveBeenCalledOnce();
+    store.clear();
+    view.unmount();
+    expect(store.read("owner", "a", "Alpha")).toBeNull();
+  });
+
+  it("waits for CM's deferred DOM read before saving and cancels completion for a newer composition or disposed editor", async () => {
+    const onChange = vi.fn();
+    const onSave = vi.fn();
+    const onCompositionChange = vi.fn();
+    const rendered = render(<CodeMirrorMarkdownEditor livePreview onChange={onChange} onSave={onSave} onCompositionChange={onCompositionChange} value="" />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const cm = EditorView.findFromDOM(editor)!;
+    const measurements: Parameters<EditorView["requestMeasure"]>[0][] = [];
+    vi.spyOn(cm, "requestMeasure").mockImplementation((request) => { if (request) measurements.push(request); });
+    const flushMeasurements = async () => {
+      const pending = measurements.splice(0);
+      await act(async () => {
+        pending.forEach((request) => { if (request) request.write?.(request.read(cm), cm); });
+        await Promise.resolve();
+      });
+    };
+    fireEvent.compositionStart(editor);
+    fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+    fireEvent.compositionEnd(editor, { data: "한글" });
+    await act(async () => { await Promise.resolve(); });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onCompositionChange.mock.calls).toEqual([[true]]);
+    // Model Android's delayed DOM read: CM receives its final text only when
+    // the scheduled measurement cycle flushes pending native input.
+    act(() => cm.dispatch({ changes: { from: 0, insert: "한글" }, annotations: Transaction.userEvent.of("input.type.compose") }));
+    expect(onChange).not.toHaveBeenCalled();
+    await flushMeasurements();
+    expect(onChange).toHaveBeenCalledExactlyOnceWith("한글");
+    expect(onSave).toHaveBeenCalledOnce();
+
+    fireEvent.compositionStart(editor);
+    fireEvent.compositionEnd(editor);
+    fireEvent.compositionStart(editor);
+    await flushMeasurements();
+    expect(onCompositionChange.mock.calls.filter(([composing]) => !composing)).toHaveLength(1);
+    expect(onChange).toHaveBeenCalledOnce();
+    act(() => cm.dispatch({ changes: { from: cm.state.doc.length, insert: " 日本語" }, annotations: Transaction.userEvent.of("input.type.compose") }));
+    fireEvent.compositionEnd(editor);
+    await flushMeasurements();
+    expect(onChange).toHaveBeenLastCalledWith("한글 日本語");
+
+    fireEvent.compositionStart(editor);
+    fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+    fireEvent.compositionEnd(editor);
+    rendered.unmount();
+    await flushMeasurements();
+    expect(onSave).toHaveBeenCalledOnce();
+  });
+
+  it("flushes an in-flight composition into its original document when switching notes", () => {
+    const firstChange = vi.fn();
+    const secondChange = vi.fn();
+    const view = render(<CodeMirrorMarkdownEditor documentKey="a" onChange={firstChange} value="" />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const cm = EditorView.findFromDOM(editor)!;
+    fireEvent.compositionStart(editor);
+    act(() => cm.dispatch({ changes: { from: 0, insert: "한글" }, annotations: Transaction.userEvent.of("input.type.compose") }));
+    view.rerender(<CodeMirrorMarkdownEditor documentKey="b" onChange={secondChange} value="다른 문서" />);
+    expect(firstChange).toHaveBeenCalledExactlyOnceWith("한글");
+    expect(secondChange).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("다른 문서");
+  });
+
+  it("opens the built-in document search through a host request", () => {
+    const onSearchHandled = vi.fn();
+    render(<CodeMirrorMarkdownEditor onChange={() => undefined} onSearchHandled={onSearchHandled} searchRequest={{ id: 3 }} value="searchable" />);
+    expect(document.querySelector('.cm-search input[name="search"]')).not.toBeNull();
+    expect(onSearchHandled).toHaveBeenCalledWith(3);
+  });
+
   it("exposes an accessible multiline editor and preserves literal tabs", () => {
     const onChange = vi.fn();
     render(<CodeMirrorMarkdownEditor onChange={onChange} value={"a\tb"} />);
@@ -840,6 +974,63 @@ describe("CodeMirrorMarkdownEditor", () => {
     });
   });
 
+  it("refreshes mounted Dataview results after inventory and metadata arrive without editing or remounting the document", async () => {
+    const updates = new LivePreviewUpdates();
+    const onChange = vi.fn();
+    const renderBlock = vi.fn();
+    const MemoEditor = memo(CodeMirrorMarkdownEditor);
+    const value = "Draft\n\n```dataview\nLIST\nSORT file.name ASC\nLIMIT 20\n```";
+    const firstEntries: VaultIndexEntry[] = [
+      { id: "day", path: "2026-09-05.md", kind: "markdown" },
+      { id: "drawing", path: "새 드로잉.md", kind: "markdown" }
+    ];
+    const self: VaultIndexEntry = { id: "self", path: "E2E Dataview.md", kind: "markdown" };
+    const emptyMetadata: ParsedMarkdownMetadata = { aliases: [], blocks: [], headings: [], links: [], properties: {}, tags: [] };
+    const firstMetadata = new Map(firstEntries.map((entry) => [entry.id, emptyMetadata]));
+    type Context = { entries: VaultIndexEntry[]; metadata: Map<string, ParsedMarkdownMetadata> };
+    function Workspace(context: Context) {
+      const contextRef = useRef(context);
+      // Mirrors the committed callback refs used by memoized owner Wiki slots.
+      useLayoutEffect(() => {
+        contextRef.current = context;
+        updates.refresh();
+      }, [context]);
+      const renderCodeBlock = useCallback((language: string, source: string) => {
+        renderBlock();
+        const latest = contextRef.current;
+        return language === "dataview" ? <DataviewBlock entries={latest.entries} metadataByEntryId={latest.metadata} source={source} /> : undefined;
+      }, []);
+      return <MemoEditor livePreview onChange={onChange} previewUpdates={updates} renderCodeBlock={renderCodeBlock} value={value} />;
+    }
+    const rendered = render(<Workspace entries={firstEntries} metadata={firstMetadata} />);
+    expect(await screen.findByRole("button", { name: "2026-09-05" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "E2E Dataview" })).not.toBeInTheDocument();
+    const cm = EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!;
+    const blockHost = rendered.container.querySelector(".cm-live-complex-block");
+    act(() => cm.dispatch({ changes: { from: 5, insert: " edited" }, selection: { anchor: 8 }, annotations: Transaction.userEvent.of("input.type") }));
+    onChange.mockClear();
+    const state = cm.state;
+    const nextEntries = [...firstEntries, self];
+    rendered.rerender(<Workspace entries={nextEntries} metadata={firstMetadata} />);
+    expect(screen.queryByRole("button", { name: "E2E Dataview" })).not.toBeInTheDocument();
+    rendered.rerender(<Workspace entries={nextEntries} metadata={new Map([...firstMetadata, [self.id, emptyMetadata]])} />);
+    expect(await screen.findByRole("button", { name: "E2E Dataview" })).toBeInTheDocument();
+    expect(EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))).toBe(cm);
+    expect(cm.state).toBe(state);
+    expect(rendered.container.querySelector(".cm-live-complex-block")).toBe(blockHost);
+    expect(onChange).not.toHaveBeenCalled();
+
+    // Removed access must also remove a previously visible result immediately.
+    rendered.rerender(<Workspace entries={firstEntries} metadata={firstMetadata} />);
+    expect(screen.queryByRole("button", { name: "E2E Dataview" })).not.toBeInTheDocument();
+    act(() => { undo(cm); });
+    expect(cm.state.doc.toString()).toBe(value);
+    await act(async () => { rendered.unmount(); await Promise.resolve(); });
+    renderBlock.mockClear();
+    act(() => updates.refresh());
+    expect(renderBlock).not.toHaveBeenCalled();
+  });
+
   it("keeps a complex block as canonical Markdown while its line is selected", () => {
     const value = [
       "| 이름 | 상태 |",
@@ -852,6 +1043,54 @@ describe("CodeMirrorMarkdownEditor", () => {
 
     expect(container.querySelector(".cm-live-complex-block")).toBeNull();
     expect(screen.getByLabelText("Markdown 편집기")).toHaveTextContent("| 이름 | 상태 |");
+  });
+
+  it.each([
+    { ctrlKey: true, metaKey: false, shiftKey: false },
+    { ctrlKey: false, metaKey: true, shiftKey: false },
+    { ctrlKey: true, metaKey: false, shiftKey: true },
+    { ctrlKey: false, metaKey: true, shiftKey: true }
+  ])("opens a modifier link before mousedown can replace its widget, exactly once: %j", (modifiers) => {
+    const onLinkClick = vi.fn();
+    const onChange = vi.fn();
+    const source = "편집 위치\n[[Folder/Note#제목|연결 문서]]";
+    const { container } = render(<CodeMirrorMarkdownEditor livePreview onChange={onChange} onLinkClick={onLinkClick} value={source} />);
+    const editor = screen.getByRole("textbox", { name: "Markdown 편집기" });
+    const cm = EditorView.findFromDOM(editor)!;
+    const anchor = container.querySelector<HTMLElement>(".cm-live-wikilink")!;
+    expect(anchor).toHaveTextContent("연결 문서");
+    const originalSelection = cm.state.selection.toJSON();
+    // The real browser sequence used to reveal raw source on mousedown and
+    // destroy the anchor before click. Navigation owns this pointer gesture.
+    fireEvent.mouseDown(anchor, { button: 0, ...modifiers });
+    expect(onLinkClick).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ path: "Folder/Note", subpath: "#제목" }), expect.objectContaining(modifiers)
+    );
+    expect(cm.state.selection.toJSON()).toEqual(originalSelection);
+    expect(anchor.isConnected).toBe(true);
+    fireEvent.mouseUp(anchor, { button: 0, ...modifiers });
+    fireEvent.click(anchor, { button: 0, ...modifiers });
+    expect(onLinkClick).toHaveBeenCalledOnce();
+    expect(cm.state.doc.toString()).toBe(source);
+    expect(onChange).not.toHaveBeenCalled();
+    // A later independent gesture is not mistaken for the prior click.
+    fireEvent.mouseDown(anchor, { button: 0, ...modifiers });
+    fireEvent.mouseUp(anchor, { button: 0, ...modifiers });
+    fireEvent.click(anchor, { button: 0, ...modifiers });
+    expect(onLinkClick).toHaveBeenCalledTimes(2);
+  });
+
+  it("omits line-number DOM in live editing while retaining folding and the editor session", () => {
+    const props = { documentKey: "note", onChange: vi.fn(), value: "# 문서\n\n본문" };
+    const view = render(<CodeMirrorMarkdownEditor {...props} livePreview />);
+    const editor = EditorView.findFromDOM(screen.getByRole("textbox", { name: "Markdown 편집기" }))!;
+    expect(view.container.querySelector(".cm-lineNumbers")).toBeNull();
+    expect(view.container.querySelector(".cm-foldGutter")).not.toBeNull();
+    view.rerender(<CodeMirrorMarkdownEditor {...props} livePreview={false} />);
+    expect(view.container.querySelector(".cm-lineNumbers")).not.toBeNull();
+    view.rerender(<CodeMirrorMarkdownEditor {...props} livePreview />);
+    expect(view.container.querySelector(".cm-lineNumbers")).toBeNull();
+    expect(EditorView.findFromDOM(screen.getByRole("textbox", { name: "Markdown 편집기" }))).toBe(editor);
   });
 
   it("previews and keyboard-opens internal links without turning external URLs into unsafe widgets", () => {
@@ -903,7 +1142,34 @@ describe("CodeMirrorMarkdownEditor", () => {
     );
   });
 
-  it("exposes the selected line as raw Markdown and disables replacements during IME composition", () => {
+  it.each(["한글", "日本語"])("preserves pending native %s DOM input through compositionend before CM observes it", async (text) => {
+    const onChange = vi.fn();
+    const onSave = vi.fn();
+    render(<CodeMirrorMarkdownEditor livePreview onChange={onChange} onSave={onSave} value="" />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const cm = EditorView.findFromDOM(editor)!;
+    fireEvent.compositionStart(editor);
+    fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+    expect(onSave).not.toHaveBeenCalled();
+    const line = editor.querySelector(".cm-line")!;
+    const node = document.createTextNode(text);
+    line.replaceChildren(node);
+    window.getSelection()?.collapse(node, text.length);
+    expect(cm.state.doc.toString()).toBe("");
+    fireEvent.compositionEnd(editor, { data: text });
+    // The browser has committed its text, but the pending MutationObserver has
+    // not run yet. Restoring preview decorations must not erase that DOM.
+    expect(editor.textContent).toBe(text);
+    fireEvent.input(editor, { data: text, inputType: "insertCompositionText" });
+    await act(async () => { await Promise.resolve(); });
+    expect(cm.state.doc.toString()).toBe(text);
+    await waitFor(() => expect(onChange).toHaveBeenCalledExactlyOnceWith(text));
+    expect(onSave).toHaveBeenCalledOnce();
+    act(() => { undo(cm); });
+    expect(cm.state.doc.toString()).toBe("");
+  });
+
+  it("exposes the selected line as raw Markdown and disables replacements during IME composition", async () => {
     const value = "# 활성 제목\n**둘째 줄**";
     const onRevealHandled = vi.fn();
     const view = render(
@@ -917,14 +1183,14 @@ describe("CodeMirrorMarkdownEditor", () => {
 
     const editor = screen.getByLabelText("Markdown 편집기");
     expect(editor).toHaveTextContent("# 활성 제목");
-    expect(view.container.querySelector(".cm-live-heading")).toBeNull();
+    expect(view.container.querySelector(".cm-live-heading")).toHaveTextContent("# 활성 제목");
     expect(view.container.querySelector(".cm-live-strong")).toHaveTextContent("둘째 줄");
 
     fireEvent.compositionStart(editor, { data: "한" });
     expect(view.container.querySelector(".cm-live-strong")).toBeNull();
     expect(editor).toHaveTextContent("**둘째 줄**");
-    fireEvent.compositionEnd(editor, { data: "한" });
-    expect(view.container.querySelector(".cm-live-strong")).toHaveTextContent("둘째 줄");
+    await act(async () => { fireEvent.compositionEnd(editor, { data: "한" }); await Promise.resolve(); });
+    await waitFor(() => expect(view.container.querySelector(".cm-live-strong")).toHaveTextContent("둘째 줄"));
 
     view.rerender(
       <CodeMirrorMarkdownEditor

@@ -101,6 +101,9 @@ jobs:
           - label: Encrypted Vault WebKit
             browsers: webkit
             command: npm run test:e2e:vault -- --project=vault-webkit-desktop-1280 --project=vault-webkit-mobile-390 --project=vault-webkit-mobile-320
+          - label: Encrypted Vault Firefox
+            browsers: firefox
+            command: QUICKMEMO_E2E_EXTRA_BROWSERS=true npm run test:e2e:vault -- --project=vault-firefox-desktop-1280
     steps:
       - name: Checkout
         uses: actions/checkout@v6

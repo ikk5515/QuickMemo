@@ -1,3 +1,4 @@
+import workspacePreferencesHandler from "./_workspace-preferences.js";
 import {
   HttpError,
   activeUserFromRequest,
@@ -17,6 +18,7 @@ import {
   randomToken,
   readJsonBody,
   requestId,
+  requestUrl,
   sha256Digest,
   updateDocumentWrite,
   verifySecureShareAppCheck
@@ -1114,6 +1116,16 @@ export default async function handler(request, response) {
   let action = "unknown";
   applySecureResponseHeaders(response, id);
   try {
+    const query = requestUrl(request).searchParams;
+    const resources = query.getAll("resource");
+    if (resources.length) {
+      if (resources.length !== 1 || resources[0] !== "workspace-preferences" || [...query.keys()].some((key) => key !== "resource")) {
+        throw new HttpError(400, "invalid_request", "Invalid Vault API resource");
+      }
+      // The metadata handler retains its own POST/origin/marker/App Check/UID
+      // guards and small body bound. Integrity actions never enter this branch.
+      return await workspacePreferencesHandler(request, response);
+    }
     requirePost(request);
     ensureSameOrigin(request);
     requireRequestMarker(request);

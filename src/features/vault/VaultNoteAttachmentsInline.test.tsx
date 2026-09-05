@@ -26,6 +26,17 @@ function attachment(index: number, extension = "txt"): NoteAttachmentSnapshot {
 }
 
 describe("VaultNoteAttachmentsInline", () => {
+  it("keeps an empty shelf to one accessible add-file action", async () => {
+    const onManage = vi.fn();
+    render(<VaultNoteAttachmentsInline attachments={[]} loading={false} onManage={onManage} />);
+    expect(screen.getByLabelText("노트 첨부파일")).toHaveClass("is-empty");
+    expect(screen.queryByText("0개")).not.toBeInTheDocument();
+    expect(screen.queryByText("첨부파일이 없습니다.")).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "노트에 파일 추가" });
+    await userEvent.click(button);
+    expect(onManage).toHaveBeenCalledWith(button);
+  });
+
   it("shows a bounded metadata summary with the exact remaining count", () => {
     render(
       <VaultNoteAttachmentsInline

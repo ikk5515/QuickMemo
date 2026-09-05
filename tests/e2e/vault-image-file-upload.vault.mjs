@@ -1,6 +1,7 @@
 /* global Buffer */
 
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors,
   expectCleanRuntime,
@@ -39,7 +40,7 @@ function activeEntryId(page) {
 }
 
 async function editorSource(editor) {
-  return (await editor.locator(".cm-line").allTextContents()).join("\n");
+  return await readVaultEditorSource(editor);
 }
 
 function imageEmbeds(source) {
@@ -77,14 +78,7 @@ async function selectOnePixelPng(page, button, name) {
 }
 
 async function saveActiveEntry(page) {
-  const save = page.getByRole("button", { name: "저장", exact: true });
-  const saveState = page.locator(".vault-save-state");
-  await expect(save).toBeEnabled();
-  await save.click();
-  // Observe the in-flight transition before accepting the terminal label so a
-  // stale pre-click "저장됨" cannot race the encrypted title/path mutation.
-  await expect(save).toBeDisabled();
-  await expect(saveState).toHaveText("저장됨", { timeout: 30_000 });
+  await saveVaultDocument(page);
 }
 
 async function rawOwnedNoteDocuments(request, fixture) {
@@ -161,10 +155,10 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
   await saveActiveEntry(page);
   const entryId = await activeEntryId(page);
 
-  await test.step("select a PNG from Source mode", async () => {
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+  await test.step("select the first PNG in the live editor", async () => {
+
     const sourceWrapper = page.locator(
-      ".vault-note-content > .vault-codemirror:not(.vault-codemirror--live-preview)"
+      ".vault-note-content > .vault-codemirror--live-preview"
     );
     const sourcePicker = await expectImageFilePicker(sourceWrapper);
     await selectOnePixelPng(page, sourcePicker.button, sourceFileName);
@@ -174,10 +168,12 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
       message: "Source file selection must insert one internal image embed",
       timeout: 45_000
     }).toBe(1);
+    await editor.press("ControlOrMeta+End");
+    await editor.press("Enter");
   });
 
-  await test.step("select a PNG from Live Preview", async () => {
-    await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
+  await test.step("select a second PNG without replacing the live editor", async () => {
+
     const liveWrapper = page.locator(
       ".vault-note-content > .vault-codemirror--live-preview"
     );
@@ -199,14 +195,15 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     }).toEqual({ assets: 2, markdown: 1, total: 3 });
   });
 
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
+  await editor.press("ControlOrMeta+End");
+  await editor.press("Enter");
   let persistedSource = "";
   await expect.poll(async () => {
     persistedSource = await editorSource(editor);
     return imageEmbeds(persistedSource).length;
   }, {
-    message: "Source mode must contain the two image embeds created in both editor modes",
+    message: "The live editor must preserve both raw internal image embeds",
     timeout: 45_000
   }).toBe(2);
   const embeds = imageEmbeds(persistedSource);
@@ -228,8 +225,7 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
   expect(statesAfterBothUploads.find((state) => state.id === entryId)?.folderId ?? null).toBeNull();
 
   await test.step("save and prove plaintext is absent from Firestore", async () => {
-    const save = page.getByRole("button", { name: "저장", exact: true });
-    if (await save.isEnabled()) await save.click();
+    await saveVaultDocument(page, { allowClean: true });
     await expect(page.locator(".vault-save-state")).toHaveText("저장됨", { timeout: 35_000 });
     await expect.poll(async () => {
       const states = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
@@ -288,7 +284,8 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(noteTitle);
     await expect(page.getByRole("treeitem", { name: "붙여넣은 이미지", exact: true }))
       .toHaveCount(1);
-    await page.getByRole("button", { name: "읽기 보기", exact: true }).click();
+
+    await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+End");
     const inlineAssets = page.locator(".vault-markdown-embed-card--asset");
     await expect(inlineAssets).toHaveCount(2);
     for (const imageTitle of imageTitles) {
@@ -304,7 +301,7 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     }
     await expect(inlineAssets.locator("button")).toHaveCount(0);
     await expect(inlineAssets.getByRole("link", { name: "다운로드" })).toHaveCount(0);
-    await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
     const restoredEditor = page.getByRole("textbox", { name: "Markdown 편집기" });
     await expect.poll(() => editorSource(restoredEditor), {
       message: "both image embeds must survive a locked encrypted Vault reload",
@@ -317,14 +314,16 @@ test("Source and Live Preview file pickers persist encrypted Markdown image embe
     await navigateWithinApp(page, `/wiki?note=${entryId}`);
     await page.reload();
     await unlockEncryptedVault(page, fixture.viewerAuth.password);
-    await expect(page.locator(".wiki-title")).toHaveText(noteTitle);
+    await expect(page.locator(".wiki-panel-document-title")).toHaveText(noteTitle);
+    await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+End");
     for (const imageTitle of imageTitles) {
-      const image = page.locator(".wiki-body").getByRole("img", { name: imageTitle, exact: true });
+      const image = page.locator(".wiki-document-editor").getByRole("img", { name: imageTitle, exact: true });
       await image.scrollIntoViewIfNeeded();
       await expect(image).toBeVisible();
       await expect.poll(() => image.evaluate((element) => element.complete && element.naturalWidth > 0)).toBe(true);
     }
-    await expect(page.getByRole("textbox", { name: "Markdown 편집기" })).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: "Markdown 편집기" })).toBeEditable();
+    await expect.poll(() => readVaultEditorSource(page.getByRole("textbox", { name: "Markdown 편집기" }))).toBe(persistedSource);
     expect(await ownedVaultNotesState(request, fixture.viewerAuth.uid)).toEqual(beforeReading);
   });
 

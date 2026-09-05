@@ -28,7 +28,8 @@ test("a sealed Vault reconnect reads the ready marker without repeating the inve
 
   page.on("request", (networkRequest) => {
     const url = new URL(networkRequest.url());
-    if (url.pathname === "/api/vault-integrity" && networkRequest.method() === "POST") {
+    // UI metadata shares the Hobby function, but never performs inventory work.
+    if (url.pathname === "/api/vault-integrity" && !url.searchParams.has("resource") && networkRequest.method() === "POST") {
       integritySealRequests += 1;
     }
   });

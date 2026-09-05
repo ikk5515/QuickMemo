@@ -1,6 +1,7 @@
 /* global getComputedStyle */
 
 import { expect, test } from "@playwright/test";
+import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors,
   expectCleanRuntime,
@@ -104,7 +105,7 @@ async function expectEncryptedFirestoreDocument(request, fixture, noteId) {
 
 async function expectEditorSource(editor, expectedSource) {
   await expect.poll(async () => (
-    (await editor.locator(".cm-line").allTextContents()).join("\n")
+    await readVaultEditorSource(editor)
   )).toBe(expectedSource);
 }
 
@@ -236,35 +237,33 @@ test("authenticated encrypted Vault works across the supported responsive widths
 
   await page.getByLabel("노트 이름").fill("E2E 연결 노트");
 
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await expect(editor).toBeVisible();
   await editor.fill(markdownSource);
 
-  const saveButton = page.getByRole("button", { name: "저장", exact: true });
-  await expect(saveButton).toBeEnabled();
-  await saveButton.click();
+  await saveVaultDocument(page);
   await expectEditorSource(editor, markdownSource);
 
   const activeTabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
   expect(activeTabId).toMatch(/^entry:/u);
   const noteId = activeTabId?.slice("entry:".length) ?? "";
   await expectEncryptedFirestoreDocument(request, fixture, noteId);
-  await expect(saveButton).toBeDisabled();
   await expect(page.getByRole("tab", { name: "E2E 연결 노트", exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "라이브 프리뷰", exact: true }).click();
+  for (const removedMode of ["소스 모드", "라이브 프리뷰", "읽기 보기"]) {
+    await expect(page.getByRole("button", { name: removedMode, exact: true })).toHaveCount(0);
+  }
   const liveEditor = page.locator(".vault-note-content > .vault-codemirror--live-preview");
   await expect(liveEditor).toBeVisible();
   await expect(liveEditor.locator(".cm-editor")).toHaveCount(1);
   await expect(page.locator(".vault-note-content > .vault-markdown-renderer")).toHaveCount(0);
-  // Mode switches preserve the caret. Activate this line before checking its
+  // Activate this line before checking its
   // raw Markdown syntax; inactive headings intentionally hide the # marker.
   await liveEditor.locator(".cm-line").first().click();
   await expect(liveEditor.locator(".cm-line").first()).toContainText("# E2E Markdown");
   await expect(liveEditor.locator(".cm-live-wikilink")).toContainText("연결 대상");
   await expect(liveEditor.locator(".cm-live-tag")).toContainText("#vault/e2e");
-  await page.getByRole("button", { name: "소스 모드", exact: true }).click();
+
   await expectEditorSource(editor, markdownSource);
 
   if (mobileLayout) {

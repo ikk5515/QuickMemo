@@ -1,6 +1,6 @@
 /* global console, process */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { basename, extname, join, relative } from "node:path";
 
 const root = process.cwd();
 const token = (...parts) => parts.join("");
@@ -75,6 +75,20 @@ for (const path of sourceFiles) {
   }
 }
 
+// Vite maps each API entrypoint to one Hobby function; underscore/dot helpers
+// and declarations are excluded by Vercel's documented utility-file rules.
+const maximumHobbyFunctions = 12;
+const apiEntryExtensions = new Set([".js", ".mjs", ".cjs", ".ts", ".go", ".py", ".rb"]);
+const apiEntrypoints = collectFiles(join(root, "api")).filter((path) => (
+  apiEntryExtensions.has(extname(path))
+  && !path.endsWith(".d.ts")
+  && !basename(path).startsWith("_")
+  && !relative(join(root, "api"), path).split(/[\\/]/u).some((part) => part.startsWith("."))
+));
+if (apiEntrypoints.length > maximumHobbyFunctions) {
+  errors.push(`Vercel Hobby supports at most ${maximumHobbyFunctions} API functions; found ${apiEntrypoints.length}. Move utilities to underscore files or dispatch related authenticated resources from an existing handler.`);
+}
+
 const clientSourceFiles = collectFiles(join(root, "src")).filter(shouldScan);
 for (const path of clientSourceFiles) {
   const content = readFileSync(path, "utf8");
@@ -117,4 +131,4 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log("Functions-free security guard passed.");
+console.log(`Functions-free security guard passed; ${apiEntrypoints.length}/${maximumHobbyFunctions} Vercel Hobby API functions.`);

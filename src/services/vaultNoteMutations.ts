@@ -303,13 +303,15 @@ function validVaultNoteSuccess(
 export async function vaultNoteApiRequest<T>(
   ownerUid: string,
   payload: VaultNoteApiPayload,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  beforeDispatch?: () => void
 ): Promise<T> {
   const user = auth.currentUser;
   if (!user || user.uid !== ownerUid) {
     throw new VaultNoteApiError("authentication_required", 401);
   }
   signal?.throwIfAborted();
+  beforeDispatch?.();
   const deadline = createVaultApiDeadline(signal);
   let idToken: string;
   let verificationToken: string | null;
@@ -323,6 +325,11 @@ export async function vaultNoteApiRequest<T>(
     if (signal?.aborted) throw error;
     throw new VaultNoteApiError(deadline.timedOut() ? "network_timeout" : "network_error", 0);
   }
+  try {
+    signal?.throwIfAborted();
+    beforeDispatch?.();
+    if (auth.currentUser?.uid !== ownerUid) throw new VaultNoteApiError("authentication_required", 401);
+  } catch (error) { deadline.dispose(); throw error; }
   const headers = new Headers({
     accept: "application/json",
     authorization: `Bearer ${idToken}`,
@@ -377,13 +384,15 @@ export async function vaultNoteApiRequest<T>(
 export async function mutateVaultNote<TPayload extends VaultNoteApiPayload>(
   ownerUid: string,
   payload: TPayload,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  beforeDispatch?: () => void
 ): Promise<VaultNoteMutationResultFor<TPayload>> {
   try {
     return await vaultNoteApiRequest<VaultNoteMutationResultFor<TPayload>>(
       ownerUid,
       payload,
-      signal
+      signal,
+      beforeDispatch
     );
   } catch (caught) {
     const responseMayHaveBeenLost = caught instanceof VaultNoteApiError
@@ -398,7 +407,8 @@ export async function mutateVaultNote<TPayload extends VaultNoteApiPayload>(
     return vaultNoteApiRequest<VaultNoteMutationResultFor<TPayload>>(
       ownerUid,
       payload,
-      signal
+      signal,
+      beforeDispatch
     );
   }
 }
