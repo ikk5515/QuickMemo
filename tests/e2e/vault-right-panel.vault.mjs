@@ -174,14 +174,21 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
     await expect(separator).toBeVisible();
     await separator.focus();
     await separator.press("Home");
-    await expect(separator).toHaveAttribute("aria-valuenow", "250");
+    await expect(separator).toHaveAttribute("aria-valuenow", "230");
+    await expectHorizontallyContained(panel.locator(":scope > header"), panel.locator(":scope > header > button"));
+    // At the minimum inspector width the icon strip can scroll; keyboard
+    // focus must still reveal and activate the last tab beside the close button.
+    await tabs.last().focus();
+    await tabs.last().press("Enter");
+    await expect(panel.locator(".vault-right-panel-current-mode")).toHaveText("File Recovery");
+    await expectHorizontallyContained(panel.locator(":scope > header > div"), tabs.last());
     const maximumWidth = Number(await separator.getAttribute("aria-valuemax"));
-    expect(maximumWidth).toBeGreaterThanOrEqual(250);
+    expect(maximumWidth).toBeGreaterThanOrEqual(230);
     expect(maximumWidth).toBeLessThanOrEqual(480);
     await separator.press("End");
     await expect(separator).toHaveAttribute("aria-valuenow", `${maximumWidth}`);
     await separator.press("ArrowRight");
-    await expect(separator).toHaveAttribute("aria-valuenow", `${Math.max(250, maximumWidth - 10)}`);
+    await expect(separator).toHaveAttribute("aria-valuenow", `${Math.max(230, maximumWidth - 10)}`);
     await separator.press("Home");
     const bounds = await separator.boundingBox();
     expect(bounds).not.toBeNull();
@@ -192,10 +199,10 @@ test("right-panel tabs, narrow tools, and encrypted resizing stay usable", async
       await page.mouse.up();
     }
     const draggedWidth = Number(await separator.getAttribute("aria-valuenow"));
-    if (maximumWidth === 250) {
-      expect(draggedWidth, "Dragging must preserve the editor when the right panel has no room to grow").toBe(250);
+    if (maximumWidth === 230) {
+      expect(draggedWidth, "Dragging must preserve the editor when the right panel has no room to grow").toBe(230);
     } else {
-      expect(draggedWidth).toBeGreaterThan(250);
+      expect(draggedWidth).toBeGreaterThan(230);
     }
     expect(draggedWidth).toBeLessThanOrEqual(maximumWidth);
     await page.waitForTimeout(900);

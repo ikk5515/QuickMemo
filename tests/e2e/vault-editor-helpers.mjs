@@ -1,5 +1,17 @@
 import { expect } from "@playwright/test";
 
+// Playwright's ControlOrMeta follows the test host OS, but CM6 follows the
+// browser platform. An emulated iPhone on Linux therefore needs Meta, not Ctrl.
+export async function pressVaultEditorModKey(editor, key) {
+  const modifier = await editor.evaluate((element) => {
+    const browser = element.ownerDocument.defaultView.navigator;
+    const appleMobile = /Apple Computer/u.test(browser.vendor)
+      && (/Mobile\/\w+/u.test(browser.userAgent) || browser.maxTouchPoints > 2);
+    return appleMobile || /Mac/u.test(browser.platform) ? "Meta" : "Control";
+  });
+  await editor.press(`${modifier}+${key}`);
+}
+
 // Match EditorView.findFromDOM's lookup without adding a production test API.
 // Live Preview decorates/virtualizes rendered lines; encrypted fidelity checks
 // must read the actual CM6 document rather than its visible preview text.

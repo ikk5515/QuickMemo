@@ -719,7 +719,18 @@ export function CodeMirrorMarkdownEditor({
 
   useEffect(() => {
     // Focus changes never recreate the editor or interrupt a pending paste.
-    if (autoFocus) viewRef.current?.focus();
+    const view = viewRef.current;
+    if (!autoFocus || !view) return;
+    const activeElement = view.dom.ownerDocument.activeElement;
+    // A lazy first mount can finish after the user has focused the note title
+    // or another field. Never redirect that field's next keystrokes into CM.
+    const externalInput = activeElement?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])');
+    const focusedEditor = externalInput instanceof HTMLElement ? EditorView.findFromDOM(externalInput) : null;
+    // Activating another document intentionally moves its caret. A CM search
+    // field is still a form input and must keep its explicitly chosen focus.
+    const isEditorContent = focusedEditor?.contentDOM === externalInput;
+    if (externalInput && !isEditorContent && !view.dom.contains(externalInput) && !externalInput.closest("[inert]")) return;
+    view.focus();
   }, [ariaLabel, autoFocus, documentKey]);
 
   useEffect(() => {

@@ -1,6 +1,7 @@
 import {
   doc,
   getDoc,
+  getDocFromServer,
   runTransaction,
   serverTimestamp,
   type DocumentData,
@@ -39,6 +40,7 @@ const maxVaultWorkspaceRevision = 999_999_999_999;
 const maxVaultWorkspacePlaintextBytes = 512 * 1024;
 const maxVaultWorkspaceDepth = 64;
 const maxVaultWorkspaceValues = 100_000;
+const maxWorkspaceCommitReceipts = 5;
 
 export class VaultWorkspaceRevisionConflictError extends Error {
   readonly actualRevision: number;
@@ -284,46 +286,92 @@ export async function saveVaultWorkspace<T extends VaultWorkspaceState>(
     throw new Error("워크스페이스 암호화 세션을 확인할 수 없습니다.");
   }
   const serialized = serializeWorkspaceState(state);
+  // A rejected commit can already have reached the server. Keep only the
+  // ciphertexts prepared by this call, including bounded SDK retry attempts.
+  const receipts: VaultWorkspaceDocument[] = [];
+  const rememberReceipt = (receipt: VaultWorkspaceDocument) => {
+    receipts.push({
+      ...receipt,
+      encryptedState: { ...receipt.encryptedState },
+      wrappedKey: { ...receipt.wrappedKey }
+    });
+    if (receipts.length > maxWorkspaceCommitReceipts) receipts.shift();
+  };
 
-  return runTransaction(db, async (transaction) => {
-    const reference = workspaceRef(uid);
-    const snapshot = await transaction.get(reference);
-    if (!snapshot.exists()) {
-      if (expected !== undefined && expected !== 0) {
-        throw new VaultWorkspaceRevisionConflictError(expected, 0);
+  try {
+    return await runTransaction(db, async (transaction) => {
+      const reference = workspaceRef(uid);
+      const snapshot = await transaction.get(reference);
+      if (!snapshot.exists()) {
+        if (expected !== undefined && expected !== 0) {
+          throw new VaultWorkspaceRevisionConflictError(expected, 0);
+        }
+        const workspaceKey = await generateNoteKey();
+        const [encryptedState, wrappedKey] = await Promise.all([
+          encryptText(serialized, workspaceKey),
+          wrapNoteKey(workspaceKey, profile.publicKeyJwk)
+        ]);
+        transaction.set(reference, {
+          ownerUid: uid,
+          encryptedState,
+          wrappedKey,
+          revision: 1,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp()
+        });
+        rememberReceipt({ ownerUid: uid, encryptedState, wrappedKey, revision: 1 });
+        return { revision: 1 };
       }
-      const workspaceKey = await generateNoteKey();
-      const [encryptedState, wrappedKey] = await Promise.all([
-        encryptText(serialized, workspaceKey),
-        wrapNoteKey(workspaceKey, profile.publicKeyJwk)
-      ]);
-      transaction.set(reference, {
-        ownerUid: uid,
+
+      const stored = validateStoredWorkspace(snapshot.data(), uid);
+      const requiredRevision = expected ?? 0;
+      if (stored.revision !== requiredRevision) {
+        throw new VaultWorkspaceRevisionConflictError(requiredRevision, stored.revision);
+      }
+      if (stored.revision >= maxVaultWorkspaceRevision) {
+        throw new RangeError("워크스페이스 revision 한도에 도달했습니다.");
+      }
+      const workspaceKey = await unwrapNoteKey(stored.wrappedKey, privateKey);
+      const encryptedState = await encryptText(serialized, workspaceKey);
+      const revision = stored.revision + 1;
+      transaction.update(reference, {
         encryptedState,
-        wrappedKey,
-        revision: 1,
-        createdAt: serverTimestamp(),
+        revision,
         updatedAt: serverTimestamp()
       });
-      return { revision: 1 };
-    }
-
-    const stored = validateStoredWorkspace(snapshot.data(), uid);
-    const requiredRevision = expected ?? 0;
-    if (stored.revision !== requiredRevision) {
-      throw new VaultWorkspaceRevisionConflictError(requiredRevision, stored.revision);
-    }
-    if (stored.revision >= maxVaultWorkspaceRevision) {
-      throw new RangeError("워크스페이스 revision 한도에 도달했습니다.");
-    }
-    const workspaceKey = await unwrapNoteKey(stored.wrappedKey, privateKey);
-    const encryptedState = await encryptText(serialized, workspaceKey);
-    const revision = stored.revision + 1;
-    transaction.update(reference, {
-      encryptedState,
-      revision,
-      updatedAt: serverTimestamp()
+      rememberReceipt({ ownerUid: uid, encryptedState, wrappedKey: stored.wrappedKey, revision });
+      return { revision };
     });
-    return { revision };
-  });
+  } catch (error) {
+    if (receipts.length) {
+      try {
+        const snapshot = await getDocFromServer(workspaceRef(uid));
+        if (
+          snapshot.exists()
+          && snapshot.metadata.fromCache === false
+          && snapshot.metadata.hasPendingWrites === false
+        ) {
+          const stored = validateStoredWorkspace(snapshot.data(), uid);
+          const committed = receipts.some((receipt) =>
+            stored.ownerUid === receipt.ownerUid
+            && stored.revision === receipt.revision
+            && stored.wrappedKey.version === receipt.wrappedKey.version
+            && stored.wrappedKey.algorithm === receipt.wrappedKey.algorithm
+            && stored.wrappedKey.wrappedKey === receipt.wrappedKey.wrappedKey
+            && stored.encryptedState.version === receipt.encryptedState.version
+            && stored.encryptedState.algorithm === receipt.encryptedState.algorithm
+            && stored.encryptedState.iv === receipt.encryptedState.iv
+            && stored.encryptedState.cipherText === receipt.encryptedState.cipherText
+          );
+          if (committed) return { revision: stored.revision };
+        }
+      } catch {
+        // A denied/failed read or a different document must retain the original
+        // save failure; never infer success from plaintext or cached data.
+      }
+    }
+    throw error;
+  } finally {
+    receipts.length = 0;
+  }
 }

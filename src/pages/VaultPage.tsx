@@ -297,6 +297,7 @@ import type {
 import {
   DEFAULT_VAULT_RIGHT_PANEL_WIDTH,
   MIN_VAULT_RIGHT_PANEL_WIDTH,
+  VaultWorkspaceLoadInteraction,
   captureVaultWorkspaceLayout,
   clampVaultRightPanelWidth,
   clampVaultRightPanelWidthForViewport,
@@ -2027,7 +2028,7 @@ function UnlockedVaultPage({
   const latestWorkspaceStateRef = useRef<VaultPersistedWorkspaceState>(createDefaultVaultWorkspaceState());
   const globalViewportRef = useRef(globalViewport);
   const localViewportRef = useRef(localViewport);
-  const workspaceInteractionDuringLoadRef = useRef(false);
+  const workspaceInteractionDuringLoadRef = useRef(new VaultWorkspaceLoadInteraction());
   const pendingWorkspaceStateRef = useRef<VaultPersistedWorkspaceState | null>(null);
   const renameEntryRef = useRef<(
     entryId: string,
@@ -2089,7 +2090,7 @@ function UnlockedVaultPage({
     setPagePreview(null);
   }, []);
   const mobileLayout = useMobileVaultLayout();
-  const leftPanelMaxWidth = Math.max(180, Math.min(520, (vaultWorkspaceWidth || vaultViewportWidth) - 44 - 300 - (rightOpen ? 250 : 0)));
+  const leftPanelMaxWidth = Math.max(180, Math.min(520, (vaultWorkspaceWidth || vaultViewportWidth) - 52 - 300 - (rightOpen ? MIN_VAULT_RIGHT_PANEL_WIDTH : 0)));
   const effectiveLeftPanelWidth = Math.max(180, Math.min(leftPanelMaxWidth, memoSidebarPreference.width));
   useEffect(() => {
     if (!mobileLayout) setLeftOpen(!memoSidebarPreference.collapsed);
@@ -2488,6 +2489,7 @@ function UnlockedVaultPage({
     // Firestore callbacks, and worker messages cannot be cancelled reliably,
     // so invalidate every continuation before clearing all note-derived state.
     decryptionSession.clear();
+    workspaceInteractionDuringLoadRef.current.clear();
     decryptGeneration.current += 1;
     workspaceAccessScopeGenerationRef.current += 1;
     workspaceSaveGenerationRef.current += 1;
@@ -2701,7 +2703,7 @@ function UnlockedVaultPage({
     lastSavedWorkspaceRef.current = restoredSerialization;
     setLastSavedWorkspaceSerialization(restoredSerialization);
     setWorkspaceSavePending(false);
-    workspaceInteractionDuringLoadRef.current = false;
+    workspaceInteractionDuringLoadRef.current.clear();
     workspaceConflictPendingRef.current = false;
     setWorkspaceConflict(null);
     setWorkspaceReady(true);
@@ -2709,6 +2711,7 @@ function UnlockedVaultPage({
 
   function keepCurrentWorkspaceAfterConflict() {
     if (!workspaceConflict) return;
+    workspaceInteractionDuringLoadRef.current.clear();
     workspaceConflictRequestGenerationRef.current += 1;
     workspaceConflictPendingRef.current = false;
     workspaceRevisionRef.current = workspaceConflict.actualRevision;
@@ -3104,6 +3107,7 @@ function UnlockedVaultPage({
     // WebCrypto work cannot be cancelled. Invalidate every continuation and
     // synchronously wipe decrypted refs so a late Promise cannot repopulate
     // plaintext after lock, logout, or unmount.
+    workspaceInteractionDuringLoadRef.current.clear();
     decryptGeneration.current += 1;
     workspaceAccessScopeGenerationRef.current += 1;
     notesRef.current = [];
@@ -3313,7 +3317,7 @@ function UnlockedVaultPage({
           normalizeVaultWorkspaceState(record?.state),
           new Set(notesRef.current.map((note) => note.id))
         );
-        if (workspaceInteractionDuringLoadRef.current) {
+        if (workspaceInteractionDuringLoadRef.current.hasChanged(latestWorkspaceStateRef.current)) {
           if (record) {
             workspaceRevisionRef.current = record.revision;
             workspaceConflictPendingRef.current = false;
@@ -3337,7 +3341,7 @@ function UnlockedVaultPage({
           lastSavedWorkspaceRef.current = remoteSerialization;
           setLastSavedWorkspaceSerialization(remoteSerialization);
           pendingWorkspaceStateRef.current = latestWorkspaceStateRef.current;
-          workspaceInteractionDuringLoadRef.current = false;
+          workspaceInteractionDuringLoadRef.current.clear();
           workspaceConflictPendingRef.current = false;
           setWorkspaceConflict(null);
           setWorkspaceReady(true);
@@ -5559,7 +5563,7 @@ function UnlockedVaultPage({
   async function flushWorkspaceBeforeExit() {
     commitPendingGraphViewports();
     if (!workspaceReady) {
-      if (workspaceInteractionDuringLoadRef.current) {
+      if (workspaceInteractionDuringLoadRef.current.hasChanged(latestWorkspaceStateRef.current)) {
         setError("서버 워크스페이스를 확인하는 중입니다. 현재 배치를 안전하게 비교한 뒤 이동해주세요.");
         return false;
       }
@@ -5664,7 +5668,7 @@ function UnlockedVaultPage({
   useEffect(() => {
     const preventAccidentalUnload = (event: BeforeUnloadEvent) => {
       const hasDirtyDrafts = composingEntryIdsRef.current.size > 0 || Object.values(draftsRef.current).some((draft) => draft.dirty);
-      const hasUnsavedWorkspace = workspaceInteractionDuringLoadRef.current || (
+      const hasUnsavedWorkspace = workspaceInteractionDuringLoadRef.current.hasChanged(latestWorkspaceStateRef.current) || (
         workspaceReady
         && (
           JSON.stringify(latestWorkspaceStateRef.current) !== lastSavedWorkspaceRef.current
@@ -11077,10 +11081,10 @@ function UnlockedVaultPage({
               ? "pending"
               : "saved"}
         onKeyDownCapture={(event) => {
-          if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current = true;
+          if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current.record(latestWorkspaceStateRef.current);
         }}
         onPointerDownCapture={(event) => {
-          if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current = true;
+          if (!workspaceReady && event.isTrusted) workspaceInteractionDuringLoadRef.current.record(latestWorkspaceStateRef.current);
         }}
         ref={vaultWorkspaceRef}
         style={{ "--wiki-available-height": `${wikiWorkspaceHeight}px`, "--vault-right-panel-width": `${effectiveRightPanelWidth}px`, "--vault-left-panel-width": `${effectiveLeftPanelWidth}px` } as CSSProperties}
@@ -11760,6 +11764,7 @@ function UnlockedVaultPage({
                     aria-selected={rightMode === mode}
                     key={mode}
                     onClick={() => setRightMode(mode)}
+                    onFocus={(event) => event.currentTarget.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" })}
                     role="tab"
                     tabIndex={rightMode === mode ? 0 : -1}
                     title={label}

@@ -17,6 +17,7 @@ const firestoreMocks = vi.hoisted(() => {
     db: { __type: "firestore" },
     doc: vi.fn((...parts: unknown[]) => ({ id: String(parts.at(-1)), parts })),
     getDoc: vi.fn(),
+    getDocFromServer: vi.fn(),
     runTransaction: vi.fn(),
     serverTimestamp: vi.fn(() => ({ __type: "serverTimestamp" })),
     transaction
@@ -35,6 +36,7 @@ vi.mock("../lib/firebase", () => ({ db: firestoreMocks.db }));
 vi.mock("firebase/firestore", () => ({
   doc: firestoreMocks.doc,
   getDoc: firestoreMocks.getDoc,
+  getDocFromServer: firestoreMocks.getDocFromServer,
   runTransaction: firestoreMocks.runTransaction,
   serverTimestamp: firestoreMocks.serverTimestamp
 }));
@@ -63,14 +65,33 @@ const wrappedKey = {
 
 function existingSnapshot(revision = 3, ownerUid = "user-a") {
   return {
-    exists: () => true,
+    exists: (): boolean => true,
+    metadata: { fromCache: false, hasPendingWrites: false },
     data: () => ({ ownerUid, encryptedState, wrappedKey, revision })
   };
+}
+
+function committedSnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    ...existingSnapshot(4),
+    data: () => ({ ownerUid: profile.uid, encryptedState, wrappedKey, revision: 4, ...overrides })
+  };
+}
+
+function rejectAfterPreparingCommit(error: Error) {
+  firestoreMocks.runTransaction.mockImplementationOnce(async (
+    _db: unknown,
+    operation: (transaction: typeof firestoreMocks.transaction) => unknown
+  ) => {
+    await operation(firestoreMocks.transaction);
+    throw error;
+  });
 }
 
 describe("vault workspace encrypted persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    firestoreMocks.getDocFromServer.mockReset().mockResolvedValue({ exists: () => false });
     firestoreMocks.runTransaction.mockImplementation(async (
       _db: unknown,
       operation: (transaction: typeof firestoreMocks.transaction) => unknown
@@ -141,6 +162,7 @@ describe("vault workspace encrypted persistence", () => {
       }
     );
     expect(firestoreMocks.transaction.update).not.toHaveBeenCalled();
+    expect(firestoreMocks.getDocFromServer).not.toHaveBeenCalled();
   });
 
   it("updates only encrypted state and revision after an exact optimistic-concurrency match", async () => {
@@ -161,6 +183,7 @@ describe("vault workspace encrypted persistence", () => {
         updatedAt: { __type: "serverTimestamp" }
       }
     );
+    expect(firestoreMocks.getDocFromServer).not.toHaveBeenCalled();
   });
 
   it("rejects stale and omitted update revisions before unwrapping or encrypting", async () => {
@@ -177,6 +200,124 @@ describe("vault workspace encrypted persistence", () => {
     expect(cryptoMocks.unwrapNoteKey).not.toHaveBeenCalled();
     expect(cryptoMocks.encryptText).not.toHaveBeenCalled();
     expect(firestoreMocks.transaction.update).not.toHaveBeenCalled();
+    expect(firestoreMocks.getDocFromServer).not.toHaveBeenCalled();
+  });
+
+  it("recovers an exact update committed despite a permission-denied response without writing again", async () => {
+    const failure = Object.assign(new Error("commit response failed"), { code: "permission-denied" });
+    firestoreMocks.transaction.get.mockResolvedValue(existingSnapshot(3));
+    rejectAfterPreparingCommit(failure);
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot());
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: ["note-a"] }, 3)).resolves.toEqual({ revision: 4 });
+
+    expect(firestoreMocks.getDocFromServer).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: profile.uid })
+    );
+    expect(firestoreMocks.transaction.update).toHaveBeenCalledOnce();
+    expect(firestoreMocks.getDoc).not.toHaveBeenCalled();
+    expect(cryptoMocks.decryptText).not.toHaveBeenCalled();
+  });
+
+  it("recovers an exact first create with its newly wrapped key after the commit response fails", async () => {
+    firestoreMocks.transaction.get.mockResolvedValue({ exists: () => false });
+    rejectAfterPreparingCommit(new Error("connection interrupted"));
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot({ revision: 1 }));
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] })).resolves.toEqual({ revision: 1 });
+    expect(firestoreMocks.transaction.set).toHaveBeenCalledOnce();
+    expect(firestoreMocks.transaction.update).not.toHaveBeenCalled();
+  });
+
+  it("recovers a prepared attempt when an SDK retry encounters that same committed revision", async () => {
+    firestoreMocks.transaction.get.mockResolvedValueOnce(existingSnapshot(3)).mockResolvedValueOnce(existingSnapshot(4));
+    firestoreMocks.runTransaction.mockImplementationOnce(async (
+      _db: unknown,
+      operation: (transaction: typeof firestoreMocks.transaction) => unknown
+    ) => {
+      await operation(firestoreMocks.transaction);
+      return operation(firestoreMocks.transaction);
+    });
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot());
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).resolves.toEqual({ revision: 4 });
+    expect(cryptoMocks.encryptText).toHaveBeenCalledOnce();
+    expect(firestoreMocks.transaction.update).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["another ciphertext, even if it would decrypt to the same plaintext", { encryptedState: { ...encryptedState, cipherText: "other-client-ciphertext" } }],
+    ["a different IV", { encryptedState: { ...encryptedState, iv: "other-iv" } }],
+    ["a different payload algorithm", { encryptedState: { ...encryptedState, algorithm: "unknown" } }],
+    ["a different wrapped key", { wrappedKey: { ...wrappedKey, wrappedKey: "different-key" } }],
+    ["a different wrapped key version", { wrappedKey: { ...wrappedKey, version: 2 } }],
+    ["another owner", { ownerUid: "user-b" }],
+    ["a subsequent revision", { revision: 5 }],
+    ["the old revision", { revision: 3 }]
+  ])("retains the original commit error for %s", async (_label, overrides) => {
+    const failure = new Error("original commit failure");
+    firestoreMocks.transaction.get.mockResolvedValue(existingSnapshot(3));
+    rejectAfterPreparingCommit(failure);
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot(overrides));
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).rejects.toBe(failure);
+    expect(firestoreMocks.transaction.update).toHaveBeenCalledOnce();
+    expect(cryptoMocks.decryptText).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a cached snapshot", { ...committedSnapshot(), metadata: { fromCache: true, hasPendingWrites: false } }],
+    ["local pending writes", { ...committedSnapshot(), metadata: { fromCache: false, hasPendingWrites: true } }],
+    ["a missing server document", { exists: (): boolean => false }]
+  ])("does not confirm success using %s", async (_label, snapshot) => {
+    const failure = new Error("original commit failure");
+    firestoreMocks.transaction.get.mockResolvedValue(existingSnapshot(3));
+    rejectAfterPreparingCommit(failure);
+    firestoreMocks.getDocFromServer.mockResolvedValue(snapshot);
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).rejects.toBe(failure);
+  });
+
+  it("preserves the original error when the server confirmation read is denied", async () => {
+    const failure = new Error("original commit failure");
+    firestoreMocks.transaction.get.mockResolvedValue(existingSnapshot(3));
+    rejectAfterPreparingCommit(failure);
+    firestoreMocks.getDocFromServer.mockRejectedValue(new Error("server confirmation denied"));
+
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).rejects.toBe(failure);
+  });
+
+  it.each([0, 1, 5])("keeps only the latest five ciphertext receipts across retries (server attempt %i)", async (committedAttempt) => {
+    const failure = new Error("all commit responses interrupted");
+    firestoreMocks.transaction.get.mockResolvedValue(existingSnapshot(3));
+    const attempts = Array.from({ length: 6 }, (_, index) => ({ ...encryptedState, cipherText: `attempt-${index}` }));
+    for (const attempt of attempts) cryptoMocks.encryptText.mockResolvedValueOnce(attempt);
+    firestoreMocks.runTransaction.mockImplementationOnce(async (
+      _db: unknown,
+      operation: (transaction: typeof firestoreMocks.transaction) => unknown
+    ) => {
+      for (let index = 0; index < attempts.length; index += 1) await operation(firestoreMocks.transaction);
+      throw failure;
+    });
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot({ encryptedState: attempts[committedAttempt] }));
+
+    const save = saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3);
+    if (committedAttempt === 0) await expect(save).rejects.toBe(failure);
+    else await expect(save).resolves.toEqual({ revision: 4 });
+    expect(firestoreMocks.transaction.update).toHaveBeenCalledTimes(6);
+  });
+
+  it("never reuses a receipt from a previous save call", async () => {
+    const failure = new Error("first call failed without confirmation");
+    firestoreMocks.transaction.get.mockResolvedValueOnce(existingSnapshot(3)).mockResolvedValueOnce(existingSnapshot(4));
+    rejectAfterPreparingCommit(failure);
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).rejects.toBe(failure);
+
+    firestoreMocks.getDocFromServer.mockResolvedValue(committedSnapshot());
+    await expect(saveVaultWorkspace(profile, privateKey, { tabs: [] }, 3)).rejects.toMatchObject({
+      code: "vault-workspace/revision-conflict", expectedRevision: 3, actualRevision: 4
+    });
+    expect(firestoreMocks.getDocFromServer).toHaveBeenCalledOnce();
   });
 
   it("rejects a nonzero create revision as a conflict before generating keys", async () => {

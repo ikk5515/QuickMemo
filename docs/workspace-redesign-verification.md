@@ -1,6 +1,6 @@
 # Memo and wiki workspace redesign verification
 
-Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered requirements, received 2026-09-05. The earlier e9d1814 release is a baseline, not completion of this specification. Previous turn classification: progress (committed, tested and deployed that baseline); new requirements below remain unproven until verified.
+Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered requirements, received 2026-09-05. The first candidate `3f5aabdbfaed32a236b65de99b7e2c6667c0aeca` failed CI; the follow-up fixes and verification are recorded below. The earlier e9d1814 release is a baseline, not completion of this specification. Local results and production acceptance are recorded separately below.
 
 ## Implementation boundaries
 
@@ -99,12 +99,12 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 - Publication remains an explicit grant. Folder grants include descendants; individual-note grants expose the note at the public root. Automatic publishing cannot add a new grant. Original encrypted records remain unchanged.
 - Sidebar preference API accepts only width/collapsed metadata, selects its document from authenticated UID, checks same origin/App Check/active user and bounds, and uses CAS/rate limiting. Local fallback stores no note, key or plaintext body.
 - Unit benchmark on this machine (not a production latency claim): 120 notes, full baseline 183.98ms; metadata refresh 0.78ms with 0 RSA/0 AES; one body update 1.76ms with 0 RSA/1 AES. A 5,000-note metadata refresh eliminated 5,000 RSA and 10,000 AES calls. Logs `/tmp/qm-redesign-unit.log`.
-- First full suite during integration: 329 files / 3,326 tests passed, 14 failures in three tests still using the old WikiPage/mode/panel behavior. Those failures are being addressed without removing permission or source-fidelity checks. This is not a passing release gate.
+- The first integration run exposed 14 failures in three tests using the former WikiPage/mode/panel behavior. These were resolved while retaining permission and source-fidelity assertions; the final full-suite result below supersedes that run.
 
-## Latest verification checkpoints
+## Earlier verification checkpoints (historical)
 
 - Full unit checkpoint before the final browser fixes: 336 files and 3,409 tests passed; 62 emulator-only tests skipped here. API emulator integration separately passed 112 tests and Rules passed 87 tests. Full lint/typecheck/security guards passed, dependency audit has zero vulnerabilities. `/tmp/qm-redesign-final-summary.md`.
-- Production build passed. Additional browser-discovered fixes must be included in the final build before release.
+- The intermediate production build passed. The final build below includes the later browser-discovered fixes.
 - Chromium desktop browser round 2: five tests passed, including actual encrypted folder publication, raster publication, anonymous source isolation, saved descendant auto-publication, explicit note grant expansion, slug rename and revocation. One failing desktop density assertion exposed CodeMirror's stronger line-number style. `/tmp/qm-redesign-browser-round2.log`.
 - New public root flow keeps one `/wiki/{slug}` for later descendants and explicit grants; old renamed and revoked URLs return actual API 404 and discard visible panels. No original ciphertext changes are needed for public snapshots.
 - Release review found the new standalone preference endpoint would exceed the Hobby function budget. Preferences now dispatch through authenticated `/api/vault-integrity?resource=workspace-preferences` to a private helper, retaining the dedicated request marker and all authority checks. The function-budget guard rejects a thirteenth deployed endpoint.
@@ -112,7 +112,7 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 - Follow-up Chromium desktop regressions passed after correcting stale Dataview widget data, the right-divider transition race, hidden line-number gutters and the integrity request counter. Independent document edits/scroll/undo, folder-root automatic publication and preferences persisted after refresh. `/tmp/qm-redesign-browser-fixed-regressions.log`.
 - Four-document open: 873.2ms including UI work, p95 frame interval 16.7ms, no observed long tasks. Sidebar resize with four mounted editors and server preference acknowledgement: 669.4ms, p95 frame interval 9.8ms, no observed long tasks. Synthetic local fixtures; not a production network-latency claim. `/tmp/qm-redesign-evidence/desktop/`.
 - Graph benchmark passed all four Chromium/WebKit desktop/mobile cases with 5,000 nodes and 10,000 edges. First display 932–1,005ms, filter p95 18.3–27ms, observed animation 59.8–120.2fps. `/tmp/qm-redesign-graph-performance.log`.
-- Firefox native composition exposed a real input-loss race: preview decoration dispatch ran before CodeMirror consumed the final IME DOM mutation. The native-event probe and encrypted memo reload now pass; the final shared composition lifecycle and browser matrix are still under verification. CI includes a Firefox lane so this regression cannot be silently skipped.
+- Firefox native composition exposed a real input-loss race: preview decoration dispatch ran before CodeMirror consumed the final IME DOM mutation. The final shared lifecycle, native-event probe, encrypted memo reload and affected browser matrix cases pass. CI includes a Firefox lane so this regression cannot be silently skipped.
 
 
 ## Deployment boundary update
@@ -122,7 +122,7 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 - No new environment variable, credential, Firestore index/Rule or bulk migration is required. New owner/slug/preferences documents use the existing server REST identity and remain denied through client Firestore access. Legacy migration is an explicit user action.
 - The detailed current URL/publication contract is in `docs/wiki-publishing.md`. This architectural update is not a production deployment claim.
 
-## Final local release checkpoint
+## First candidate local release checkpoint
 
 - Unit: 337 files / 3,419 tests passed; 62 emulator-only tests excluded from this command and separately covered. `npx vitest run --maxWorkers=4` uses the same full suite as `npm test`; passing a second maxWorkers flag through npm was rejected before tests ran and was corrected.
 - API emulator: 112 passed; Firestore/Storage Rules: 87 passed. No backend/Rule changes followed these gates.
@@ -132,3 +132,24 @@ Authoritative specification: user attachment `pasted-text-1.txt`, 72 numbered re
 - The targeted recheck additionally exercised the complete desktop-1280 regression selection: 26 passed / 6 project-specific skips; two old test assumptions (removed source-mode selector, cross-frame pane measurements) were fixed. Both passed in `/tmp/qm-redesign-browser-last-two.log` (17.3s).
 - Public screenshots now wait for visible transitions and assert that the active document occupies the remaining width. Actual final Chrome and tablet layouts were inspected; an earlier clipped image was captured during its transition, not a settled layout. Screenshots and measurements: `/tmp/qm-redesign-evidence/`.
 - Production release and the 39-step production acceptance remain pending. These local results do not attest to the currently deployed baseline.
+
+## First CI findings and follow-up
+
+- CI `33963627067` for `3f5aabd` failed and did not deploy. Its full unit, Rules, API, security, performance and build gates passed. Responsive and WebKit browser lanes exposed the following boundary cases.
+- At 768px with a reserved scrollbar, the 52px ribbon, 180px left panel and 250px right panel left only 271px for the editor. The inspector minimum is now 230px and both width calculations reserve the touch ribbon. The editor's 280px requirement is retained, with additional 761–1024px scrollbar regressions. Focus explicitly scrolls a partly clipped inspector tab fully into view.
+- Playwright resolves `ControlOrMeta` from the test host, while CodeMirror resolves its modifier from the browser. Linux CI emulating an iPhone sent Ctrl-End instead of Meta-End. The shared test helper now sends real keyboard commands using the browser's Mac/iOS detection; Markdown and undo assertions remain intact.
+- A sidebar preference acknowledgement is separate from encrypted workspace autosave. Preference tests now wait for the relevant layout save/load before hard reloads. In the app, the first trusted input records the current layout, and only an actual layout change can conflict with a late remote load. Merely focusing or using the independent Wiki sidebar no longer counts as a layout change. Real local edits and revision conflicts retain their protection; the tracker clears at access-scope changes and explicit resolution.
+- The initially reported new-note title failure occurred before link activation. A later WebKit trace captured the first editor's delayed autofocus moving focus from the title field to the Markdown body during title input. The following body replacement removed that misplaced text, leaving the default title. External text-field focus is now respected during editor autofocus; regression checks preserve both deliberate title input and ordinary initial editor focus. Creation tests assert the saved input and active-tab titles immediately.
+- Phone preference tests wait for the responsive drawer's closed state after restoring the phone viewport. WebKit can acknowledge a viewport change before the media-query subscriber updates React; the previous helper sometimes read the old desktop state and skipped its open click. No arbitrary delay or repeated click was added.
+- A later single-browser trace proved an ambiguous commit response: the revision-4 ciphertext was present on the server even though the commit returned an error. Workspace persistence now confirms only an exact owner/revision/wrapped-key/ciphertext match from a non-cached server read after a failed attempt. Receipts are bounded to five within that call, discarded afterward, and never persisted. Ordinary successful saves add no read; genuine conflicts and failed confirmation keep the original error. The service has 28 passing tests and an independent security review found no blocker.
+- Follow-up release gates and production acceptance are recorded separately after the new candidate completes CI.
+
+## Follow-up local release checkpoint
+
+- Full unit suite: 337 files / 3,452 tests passed, with 62 emulator-only cases excluded from this command. Workspace commit recovery has 28 tests and the CodeMirror editor has 54. `/tmp/qm-ci-fix6-unit.log`.
+- Full lint and production build, including TypeScript and chunk verification, passed. Functions, sensitive-file and billing guards passed; audit found zero vulnerabilities. `/tmp/qm-ci-fix6-lint.log`, `/tmp/qm-ci-fix6-build.log`, `/tmp/qm-ci-fix3-audit.log`.
+- Firestore/Storage Rules were rerun: 87 passed. The preceding candidate's 112 real API-emulator cases passed locally and in CI; backend/Rules code is unchanged by these follow-up fixes. `/tmp/qm-ci-fix3-rules.log`.
+- Inspector keyboard, width, overflow and encrypted-resize cases passed across seven Firefox/Chromium/WebKit desktop/tablet/phone configurations. That run exposed two unrelated mobile preference failures, subsequently traced to responsive-test timing and first-editor autofocus. `/tmp/qm-ci-fix3-browser.log`.
+- Mobile preference checks passed four repetitions after waiting for the actual responsive state. The final production-code checkpoint then passed all eight combined encrypted-vault and four-document preference cases on Chromium 768/1024 and WebKit 320/390. These retain immediate title entry, exact Markdown, undo/composition, autosave, sidebar persistence, reload and overflow assertions. `/tmp/qm-ci-fix4-mobile.log`, `/tmp/qm-ci-fix6-browser.log`.
+- Independent reviews found no outstanding issue in exact-ciphertext recovery, autofocus behavior or the revised browser assertions. No dependency, security-header, Rule, environment or release-workflow change was introduced by this follow-up.
+- Exact-commit CI/deployment and authenticated production acceptance still require separate evidence.

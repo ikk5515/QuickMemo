@@ -3,6 +3,7 @@ import {
   DEFAULT_VAULT_RIGHT_PANEL_WIDTH,
   MAX_VAULT_RIGHT_PANEL_WIDTH,
   MIN_VAULT_RIGHT_PANEL_WIDTH,
+  VaultWorkspaceLoadInteraction,
   captureVaultWorkspaceLayout,
   clampVaultRightPanelWidth,
   clampVaultRightPanelWidthForViewport,
@@ -16,6 +17,26 @@ import {
 } from "./workspaceState";
 
 describe("vault workspace state", () => {
+  it("does not treat focus or independent Wiki preference clicks as a layout conflict", () => {
+    const interaction = new VaultWorkspaceLoadInteraction();
+    const state = createDefaultVaultWorkspaceState();
+    interaction.record(state);
+    interaction.record({ ...state });
+    expect(interaction.hasChanged({ ...state })).toBe(false);
+  });
+
+  it("preserves a real layout edit made while the remote workspace is loading", () => {
+    const interaction = new VaultWorkspaceLoadInteraction();
+    const initial = createDefaultVaultWorkspaceState();
+    interaction.record(initial);
+    const edited = { ...initial, left: { ...initial.left, mode: "search" as const } };
+    interaction.record(edited);
+    expect(interaction.hasChanged(edited)).toBe(true);
+    expect(interaction.hasChanged(initial)).toBe(false);
+    interaction.clear();
+    expect(interaction.hasChanged(edited)).toBe(false);
+  });
+
   it("flushes a newer layout created while an earlier exit save is in flight", async () => {
     let current = { tab: "first" };
     let lastSaved = "";
@@ -411,6 +432,14 @@ describe("vault workspace state", () => {
     expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(251);
     expect(clampVaultRightPanelWidthForViewport(200, 761, true)).toBe(MIN_VAULT_RIGHT_PANEL_WIDTH);
     expect(maxVaultRightPanelWidthForViewport(390, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
+  });
+
+  it.each([761, 768, 900, 1024])("preserves editor width at %ipx with a scrollbar and the resized left sidebar", (viewport) => {
+    const workspace = viewport - 15;
+    const leftWidth = 180;
+    const rightWidth = clampVaultRightPanelWidthForViewport(480, viewport, true, workspace, leftWidth);
+    expect(workspace - 52 - leftWidth - rightWidth).toBeGreaterThanOrEqual(280);
+    expect(rightWidth).toBeGreaterThanOrEqual(MIN_VAULT_RIGHT_PANEL_WIDTH);
   });
 
   it("keeps Daily Notes settings independent of the selected folder and normalizes invalid ids", () => {

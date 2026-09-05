@@ -117,7 +117,9 @@ export interface PersistedNamedWorkspace {
 export const MAX_VAULT_BOOKMARKS = 64;
 export const MAX_NAMED_WORKSPACES = 32;
 export const DEFAULT_VAULT_RIGHT_PANEL_WIDTH = 310;
-export const MIN_VAULT_RIGHT_PANEL_WIDTH = 250;
+// 230px keeps both sidebars and a 280px editor usable at the narrowest
+// desktop breakpoint, including a reserved scrollbar and the touch ribbon.
+export const MIN_VAULT_RIGHT_PANEL_WIDTH = 230;
 export const MAX_VAULT_RIGHT_PANEL_WIDTH = 480;
 // Reserve the wider touch ribbon; the 44px desktop ribbon leaves extra breathing room.
 const VAULT_RIBBON_WIDTH = 52;
@@ -167,6 +169,23 @@ export interface FlushLatestWorkspaceStateInput<TState> {
   getLastSavedSerialization: () => string;
   maxPasses?: number;
   save: (state: TState, serialization: string) => Promise<void>;
+}
+
+/** Only an actual layout edit can conflict with a workspace still loading. */
+export class VaultWorkspaceLoadInteraction {
+  private beforeInteraction: string | null = null;
+
+  record(state: VaultPersistedWorkspaceState) {
+    this.beforeInteraction ??= JSON.stringify(state);
+  }
+
+  hasChanged(state: VaultPersistedWorkspaceState) {
+    return this.beforeInteraction !== null && this.beforeInteraction !== JSON.stringify(state);
+  }
+
+  clear() {
+    this.beforeInteraction = null;
+  }
 }
 
 export interface FlushLatestWorkspaceStateResult {

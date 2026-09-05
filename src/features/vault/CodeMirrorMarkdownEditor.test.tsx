@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { memo, useCallback, useLayoutEffect, useRef } from "react";
 import { undo, redo } from "@codemirror/commands";
 import { Transaction } from "@codemirror/state";
+import { openSearchPanel } from "@codemirror/search";
 import { MarkdownEditorSessionStore } from "./markdownEditorSession";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
@@ -12,6 +13,113 @@ import { DataviewBlock } from "../dataview/DataviewBlock";
 import type { ParsedMarkdownMetadata, VaultIndexEntry } from "../knowledge";
 
 describe("CodeMirrorMarkdownEditor", () => {
+  it("keeps typing in the focused title when the first editor mounts late", () => {
+    const onTitleChange = vi.fn();
+    const onBodyChange = vi.fn();
+    const contents = (ready: boolean) => <>
+      <input aria-label="노트 이름" defaultValue="새 노트" onChange={onTitleChange} />
+      {ready ? <CodeMirrorMarkdownEditor autoFocus documentKey="first-note" onChange={onBodyChange} value="" /> : null}
+    </>;
+    const rendered = render(contents(false));
+    const title = screen.getByLabelText("노트 이름");
+    act(() => title.focus());
+
+    rendered.rerender(contents(true));
+
+    expect(title).toHaveFocus();
+    fireEvent.change(document.activeElement!, { target: { value: "문서 A" } });
+    expect(title).toHaveValue("문서 A");
+    expect(onTitleChange).toHaveBeenCalledOnce();
+    expect(EditorView.findFromDOM(screen.getByLabelText("Markdown 편집기"))!.state.doc.toString()).toBe("");
+    expect(onBodyChange).not.toHaveBeenCalled();
+  });
+
+  it.each(["input", "textarea", "select", "contenteditable"] as const)("respects an external %s during autofocus changes and restored document mounts", (kind) => {
+    const controls = {
+      input: <input aria-label="외부 입력" />,
+      textarea: <textarea aria-label="외부 입력" />,
+      select: <select aria-label="외부 입력"><option>선택</option></select>,
+      contenteditable: <div aria-label="외부 입력" contentEditable role="textbox" tabIndex={0} />
+    };
+    const store = new MarkdownEditorSessionStore("owner");
+    const contents = (documentKey: string, autoFocus: boolean, value = "본문") => <>
+      {controls[kind]}
+      <CodeMirrorMarkdownEditor autoFocus={autoFocus} documentKey={documentKey} onChange={() => undefined} sessionScopeKey="owner" sessionStore={store} value={value} />
+    </>;
+    const rendered = render(contents("a", false));
+    const control = screen.getByLabelText("외부 입력");
+    act(() => control.focus());
+    rendered.rerender(contents("a", true));
+    expect(control).toHaveFocus();
+    rendered.rerender(contents("b", true));
+    expect(control).toHaveFocus();
+    rendered.rerender(contents("a", true));
+    expect(control).toHaveFocus();
+    rendered.rerender(contents("a", true, "원격 본문"));
+    expect(control).toHaveFocus();
+    rendered.unmount();
+    store.clear();
+  });
+
+  it("still focuses the first body after the new-note button and an activated document after an inert editor", () => {
+    const contents = (ready: boolean) => <>
+      <button type="button">새 노트</button>
+      {ready ? <CodeMirrorMarkdownEditor autoFocus documentKey="first-note" onChange={() => undefined} value="" /> : null}
+    </>;
+    const rendered = render(contents(false));
+    act(() => screen.getByRole("button", { name: "새 노트" }).focus());
+    rendered.rerender(contents(true));
+    expect(screen.getByLabelText("Markdown 편집기")).toHaveFocus();
+    rendered.unmount();
+
+    const outside = document.createElement("div");
+    outside.contentEditable = "true";
+    outside.setAttribute("contenteditable", "true");
+    outside.tabIndex = 0;
+    document.body.append(outside);
+    try {
+      outside.focus();
+      outside.setAttribute("inert", "");
+      render(<CodeMirrorMarkdownEditor autoFocus documentKey="next-note" onChange={() => undefined} value="" />);
+      expect(screen.getByLabelText("Markdown 편집기")).toHaveFocus();
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("moves focus between two expanded CM documents when their active autofocus prop changes", () => {
+    const contents = (active: "a" | "b") => <>
+      <CodeMirrorMarkdownEditor ariaLabel="문서 A 본문" autoFocus={active === "a"} documentKey="a" onChange={() => undefined} value="A" />
+      <CodeMirrorMarkdownEditor ariaLabel="문서 B 본문" autoFocus={active === "b"} documentKey="b" onChange={() => undefined} value="B" />
+    </>;
+    const rendered = render(contents("a"));
+    const first = screen.getByLabelText("문서 A 본문");
+    const second = screen.getByLabelText("문서 B 본문");
+    expect(first).toHaveFocus();
+    expect(first.closest("[inert]")).toBeNull();
+
+    rendered.rerender(contents("b"));
+    expect(second).toHaveFocus();
+    rendered.rerender(contents("a"));
+    expect(first).toHaveFocus();
+  });
+
+  it("preserves a CM search field when another document requests autofocus", () => {
+    const contents = (active: "a" | "b") => <>
+      <CodeMirrorMarkdownEditor ariaLabel="문서 A 본문" autoFocus={active === "a"} documentKey="a" onChange={() => undefined} value="A" />
+      <CodeMirrorMarkdownEditor ariaLabel="문서 B 본문" autoFocus={active === "b"} documentKey="b" onChange={() => undefined} value="B" />
+    </>;
+    const rendered = render(contents("a"));
+    const first = screen.getByLabelText("문서 A 본문");
+    const editor = EditorView.findFromDOM(first)!;
+    act(() => { openSearchPanel(editor); });
+    const search = editor.dom.querySelector<HTMLInputElement>('input[name="search"]')!;
+    act(() => search.focus());
+    expect(search).toHaveFocus();
+    rendered.rerender(contents("b"));
+    expect(search).toHaveFocus();
+  });
+
   it.each([
     ["한글", ["ㅎ", "하", "한", "한글"]],
     ["日本語", ["に", "にほ", "にほん", "日本語"]]

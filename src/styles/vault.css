@@ -46,7 +46,7 @@
   --vault-text: var(--ink);
   --vault-text-muted: var(--muted);
   --vault-right-panel-size: clamp(
-    250px,
+    230px,
     var(--vault-right-panel-width, 310px),
     480px
   );

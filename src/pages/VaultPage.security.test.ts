@@ -65,6 +65,7 @@ describe("VaultPage security boundaries", () => {
     expect(cleanup).toContain("foldersRef.current = []");
     expect(cleanup).toContain("draftsRef.current = {}");
     expect(cleanup).toContain("knowledgeEntriesRef.current.clear()");
+    expect(cleanup).toContain("workspaceInteractionDuringLoadRef.current.clear()");
 
     const decryptEffect = vaultPageSource.match(
       /const generation = decryptGeneration\.current \+ 1;[\s\S]*?\n\s{2}\}, \[commitFolders/u

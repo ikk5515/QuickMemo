@@ -1,5 +1,6 @@
 /* global document, window, Event */
 import { expect, test } from "@playwright/test";
+import { pressVaultEditorModKey } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 import { allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow, loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario } from "./helpers.mjs";
 async function explorer(page) {
@@ -14,7 +15,7 @@ async function createNote(page, title, body) {
   await expect(page.getByLabel("노트 이름")).toBeEnabled();
   await page.getByLabel("노트 이름").fill(title);
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill(body);
-  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
+  await pressVaultEditorModKey(page.getByRole("textbox", { name: "Markdown 편집기" }), "s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
 }
 async function publishDialog(page) {

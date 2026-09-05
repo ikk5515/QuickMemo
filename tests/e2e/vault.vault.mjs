@@ -248,6 +248,10 @@ test("authenticated encrypted Vault works across the supported responsive widths
   expect(activeTabId).toMatch(/^entry:/u);
   const noteId = activeTabId?.slice("entry:".length) ?? "";
   await expectEncryptedFirestoreDocument(request, fixture, noteId);
+  // Report the actual synthetic title if a delayed snapshot regresses the
+  // label, instead of only reporting that a name-based locator was absent.
+  await expect(page.getByLabel("노트 이름")).toHaveValue("E2E 연결 노트");
+  await expect(page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]')).toHaveText("E2E 연결 노트");
   await expect(page.getByRole("tab", { name: "E2E 연결 노트", exact: true })).toBeVisible();
 
   for (const removedMode of ["소스 모드", "라이브 프리뷰", "읽기 보기"]) {

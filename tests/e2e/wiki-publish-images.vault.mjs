@@ -1,5 +1,6 @@
 /* global Buffer, window, Event */
 import { expect, test } from "@playwright/test";
+import { pressVaultEditorModKey } from "./vault-editor-helpers.mjs";
 import { allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, loginDirectly, navigateWithinApp, observePage, ownedVaultNotesState, seedScenario } from "./helpers.mjs";
 
 test("a selected folder publishes its encrypted raster image without granting access to the original note", async ({ browser, page, request }, testInfo) => {
@@ -14,7 +15,7 @@ test("a selected folder publishes its encrypted raster image without granting ac
   await create.click();
   await page.getByLabel("노트 이름").fill("이미지 원본");
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill("원본은공개하지않습니다");
-  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
+  await pressVaultEditorModKey(page.getByRole("textbox", { name: "Markdown 편집기" }), "s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const chooserPromise = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "이미지 파일 추가", exact: true }).click();
@@ -30,7 +31,7 @@ test("a selected folder publishes its encrypted raster image without granting ac
   await create.click();
   await page.getByLabel("노트 이름").fill("이미지 안내");
   await page.getByRole("textbox", { name: "Markdown 편집기" }).fill("# 이미지 안내\n\n![[이미지 원본 -1.png]]");
-  await page.getByRole("textbox", { name: "Markdown 편집기" }).press("ControlOrMeta+s");
+  await pressVaultEditorModKey(page.getByRole("textbox", { name: "Markdown 편집기" }), "s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const original = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
   await folder.click({ button: "right" });

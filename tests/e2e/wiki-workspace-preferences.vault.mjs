@@ -5,7 +5,7 @@ import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow,
   loginDirectly, navigateWithinApp, observePage, seedScenario, unlockEncryptedVault
 } from "./helpers.mjs";
-import { readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { pressVaultEditorModKey, readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 
 async function memoExplorer(page) {
@@ -19,7 +19,10 @@ async function createMemo(page, title, body) {
   await page.getByRole("textbox", { name: "노트 이름", exact: true }).fill(title);
   const editor = page.getByRole("textbox", { name: "Markdown 편집기", exact: true });
   await expect(editor).toBeEditable(); await editor.fill(body); await saveVaultDocument(page, { allowClean: true });
-  const tabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
+  await expect(page.getByRole("textbox", { name: "노트 이름", exact: true })).toHaveValue(title);
+  const activeTab = page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]');
+  await expect(activeTab).toHaveText(title);
+  const tabId = await activeTab.getAttribute("id");
   expect(tabId).toMatch(/^entry:/u); return tabId.slice("entry:".length);
 }
 function preferenceSaved(page, kind, matches) {
@@ -29,6 +32,17 @@ function preferenceSaved(page, kind, matches) {
     const payload = response.request().postDataJSON();
     return payload?.action === "set" && payload.kind === kind && matches(payload.value);
   }, { timeout: 30_000 });
+}
+async function settledWorkspace(page) {
+  // The metadata preference ACK and encrypted workspace autosave are separate.
+  // A hard reload must follow both acknowledgements, and unlock alone does not
+  // mean the encrypted layout has finished loading.
+  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", "saved", { timeout: 30_000 });
+}
+async function reloadWorkspace(page, password) {
+  await settledWorkspace(page);
+  await page.reload(); await unlockEncryptedVault(page, password);
+  await settledWorkspace(page);
 }
 async function resizeSidebar(page, kind, label) {
   const separator = page.getByRole("separator", { name: label, exact: true });
@@ -65,7 +79,7 @@ async function openWikiDocument(page, title) {
   return panel;
 }
 async function saveWikiEditor(page, editor) {
-  await editor.press("ControlOrMeta+s");
+  await pressVaultEditorModKey(editor, "s");
   await expect(page.locator(".wiki-save-state").first()).toHaveText("저장됨", { timeout: 30_000 });
 }
 
@@ -107,6 +121,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   const resizedForPreference = originalViewport.width < 1024;
   if (resizedForPreference) await page.setViewportSize({ width: 1024, height: originalViewport.height });
   await loginDirectly(page, fixture.viewerAuth, diagnostics); await navigateWithinApp(page, "/app");
+  await settledWorkspace(page);
   const documents = [];
   for (const letter of ["A", "B", "C", "D"]) {
     const title = `문서 ${letter}`;
@@ -117,21 +132,31 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   const memoWidth = await resizeSidebar(page, "memo", "메모 탐색기 너비");
   let persisted = preferenceSaved(page, "memo", (value) => value.collapsed && value.width === memoWidth);
   await (await memoExplorer(page)).getByRole("button", { name: "왼쪽 패널 접기", exact: true }).click(); await persisted;
-  await page.reload(); await unlockEncryptedVault(page, fixture.viewerAuth.password);
+  await reloadWorkspace(page, fixture.viewerAuth.password);
   await expect(page.locator('.vault-left-panel[aria-label="Vault 탐색기"]')).toHaveAttribute("inert", "");
   await page.getByRole("button", { name: "왼쪽 패널 열기", exact: true }).click();
   await expect(page.getByRole("separator", { name: "메모 탐색기 너비", exact: true })).toHaveAttribute("aria-valuenow", String(memoWidth));
 
+  await settledWorkspace(page);
   await navigateWithinApp(page, `/wiki?note=${documents[0].id}`);
+  await settledWorkspace(page);
   await wikiSearch(page);
   const wikiWidth = await resizeSidebar(page, "wiki", "위키 목록 너비 조절");
   persisted = preferenceSaved(page, "wiki", (value) => value.collapsed && value.width === wikiWidth);
   await page.getByRole("button", { name: "위키 목록 닫기", exact: true }).click(); await persisted;
-  await page.reload(); await unlockEncryptedVault(page, fixture.viewerAuth.password);
+  await reloadWorkspace(page, fixture.viewerAuth.password);
   await expect(page.locator(".wiki-sidebar")).toHaveAttribute("inert", "");
   await page.getByRole("button", { name: "위키 목록 열기", exact: true }).click();
   await expect(page.getByRole("separator", { name: "위키 목록 너비 조절", exact: true })).toHaveAttribute("aria-valuenow", String(wikiWidth));
-  if (resizedForPreference) await page.setViewportSize(originalViewport);
+  if (resizedForPreference) {
+    await page.setViewportSize(originalViewport);
+    if (originalViewport.width < 768) {
+      // WebKit acknowledges viewport resizing before matchMedia notifies React.
+      // Wait for the phone's initially closed drawer before deciding to open it.
+      await expect(page.getByRole("button", { name: "위키 목록 열기", exact: true })).toHaveAttribute("aria-expanded", "false");
+      await expect(page.locator(".wiki-sidebar")).toHaveAttribute("inert", "");
+    }
+  }
 
   await beginFrameSample(page);
   for (const document of documents) await openWikiDocument(page, document.title);
@@ -142,7 +167,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   for (const document of documents) {
     const panel = await openWikiDocument(page, document.title);
     const editor = panel.getByRole("textbox", { name: "Markdown 편집기", exact: true });
-    await editor.press("ControlOrMeta+End"); await page.keyboard.insertText(`\n\n편집-${document.letter}`);
+    await pressVaultEditorModKey(editor, "End"); await page.keyboard.insertText(`\n\n편집-${document.letter}`);
     await expect.poll(() => readVaultEditorSource(editor)).toBe(document.edited);
     await saveWikiEditor(page, editor);
     const scroller = panel.locator(".cm-scroller");
@@ -161,8 +186,8 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   const second = documents[1];
   const secondPanel = await openWikiDocument(page, second.title);
   const secondEditor = secondPanel.getByRole("textbox", { name: "Markdown 편집기", exact: true });
-  await secondEditor.press("ControlOrMeta+z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.body);
-  await secondEditor.press("ControlOrMeta+Shift+z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.edited);
+  await pressVaultEditorModKey(secondEditor, "z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.body);
+  await pressVaultEditorModKey(secondEditor, "Shift+z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.edited);
   await saveWikiEditor(page, secondEditor);
   for (const other of documents.filter((document) => document.id !== second.id)) {
     const editor = page.locator(`.wiki-panel[data-note-id="${other.id}"] .cm-content`);
@@ -172,7 +197,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   const third = documents[2];
   const compositionPanel = await openWikiDocument(page, third.title);
   const compositionEditor = compositionPanel.getByRole("textbox", { name: "Markdown 편집기", exact: true });
-  await compositionEditor.press("ControlOrMeta+End");
+  await pressVaultEditorModKey(compositionEditor, "End");
   let noteWrites = 0;
   const countWrites = (outgoing) => { if (outgoing.method() === "POST" && new URL(outgoing.url()).pathname === "/api/vault-notes") noteWrites += 1; };
   page.on("request", countWrites);
@@ -204,7 +229,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
     });
     await expect.poll(() => readVaultEditorSource(compositionEditor)).toBe(third.edited + " 조합입력완료");
     await expect(compositionEditor).toHaveAttribute("data-pending-composition-ends", "0");
-    await compositionEditor.press("ControlOrMeta+s");
+    await pressVaultEditorModKey(compositionEditor, "s");
     await compositionEditor.evaluate(() => new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve))));
     expect(noteWrites, "saving waits until the synthetic composition ends").toBe(0);
     await compositionEditor.evaluate((element) => element.dispatchEvent(new CompositionEvent("compositionend", { data: "조합입력완료", bubbles: true })));
@@ -226,7 +251,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
     await expect(editor).toHaveAttribute("data-editor-marker", document.id);
     expect(await readVaultEditorSource(editor)).toBe(document.edited);
   }
-  await page.reload(); await unlockEncryptedVault(page, fixture.viewerAuth.password);
+  await reloadWorkspace(page, fixture.viewerAuth.password);
   await expect(page.locator(".wiki-panel")).toHaveCount(4);
   await expect(page.getByRole("separator", { name: "위키 목록 너비 조절", exact: true })).toHaveAttribute("aria-valuenow", String(finalWikiWidth));
   if (resizedForPreference) await page.setViewportSize(originalViewport);

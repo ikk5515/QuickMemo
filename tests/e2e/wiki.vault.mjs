@@ -1,5 +1,6 @@
 /* global document, window, console */
 import { expect, test } from "@playwright/test";
+import { pressVaultEditorModKey } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow,
@@ -17,7 +18,7 @@ async function createMemo(page, title, body) {
   const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
   await expect(editor).toBeEditable(); const readyMs = Date.now() - start;
   await page.getByLabel("노트 이름").fill(title); await editor.fill(body);
-  await editor.press("ControlOrMeta+s");
+  await pressVaultEditorModKey(editor, "s");
   await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
   const tab = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
   expect(tab).toMatch(/^entry:/u);
