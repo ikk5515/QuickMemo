@@ -308,10 +308,25 @@ export async function readEmulatorDocument(path: string) {
 }
 
 export async function listEmulatorCollection(path: string) {
-  const response = await jsonRequest(`${firestoreRoot()}/${path}?pageSize=300`, {
-    headers: { authorization: "Bearer owner" }
-  }) as { documents?: FirestoreDocument[] };
-  return (response.documents ?? []).map(decodeDocument);
+  const url = new URL(`${firestoreRoot()}/${path}`);
+  url.searchParams.set("pageSize", "300");
+  const documents: DecodedEmulatorDocument[] = [];
+  const seenTokens = new Set<string>();
+  // Firestore may return fewer rows than pageSize while still providing a
+  // continuation token. Do not silently omit later test owners or fixtures.
+  for (let page = 0; page < 100; page += 1) {
+    const response = await jsonRequest(url.href, {
+      headers: { authorization: "Bearer owner" }
+    }) as { documents?: FirestoreDocument[]; nextPageToken?: unknown };
+    documents.push(...(response.documents ?? []).map(decodeDocument));
+    const token = response.nextPageToken;
+    if (token === undefined || token === "") return documents;
+    if (typeof token !== "string") throw new Error("Invalid emulator collection page token");
+    if (seenTokens.has(token)) throw new Error("Emulator collection pagination did not advance");
+    seenTokens.add(token);
+    url.searchParams.set("pageToken", token);
+  }
+  throw new Error("Emulator collection pagination limit exceeded");
 }
 
 export async function seedSecureShare(options: SecureShareSeedOptions) {

@@ -25,6 +25,7 @@ test("owner collapsed strip activates the requested retained editor and saves to
     const tabId = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
     expect(tabId).toMatch(/^entry:/u); ids.set(title, tabId.slice("entry:".length));
   }
+  expect(new Set(ids.values()).size, "Every created title must have a distinct source note ID").toBe(titles.length);
   await navigateWithinApp(page, `/wiki?note=${ids.get(titles[0])}`);
   await expect(page.locator('.private-wiki[data-mode="private"]')).toBeVisible();
   for (const title of titles.slice(1)) {
@@ -32,9 +33,17 @@ test("owner collapsed strip activates the requested retained editor and saves to
     await expect(page.locator('.wiki-panel[data-active="true"]')).toHaveAttribute("data-note-id", ids.get(title));
   }
   await expectVisibleWikiMotionFinished(page);
+  await expect(page.locator(".wiki-panel")).toHaveCount(titles.length);
   const documents = await page.locator(".wiki-panel").elementHandles();
   const cId = ids.get(titles[2]), dId = ids.get(titles[3]);
-  const previousNotes = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
+  let previousNotes = [];
+  await expect.poll(async () => {
+    previousNotes = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
+    return previousNotes.map((note) => note.id).sort();
+  }, { message: "All four created owner notes must exist in the server inventory before saving C" }).toEqual([...ids.values()].sort());
+  const previousC = previousNotes.find((note) => note.id === cId), previousD = previousNotes.find((note) => note.id === dId);
+  expect(previousC, "The server baseline must contain C").toEqual(expect.objectContaining({ id: cId, revision: expect.any(Number) }));
+  expect(previousD, "The server baseline must contain D").toEqual(expect.objectContaining({ id: dId, revision: expect.any(Number) }));
   const c = page.locator(`.wiki-panel[data-note-id="${cId}"]`);
   await expect(c).toHaveAttribute("aria-hidden", "true");
   const expand = page.getByRole("button", { name: `${titles[2]} 문서 펼치기`, exact: true });
@@ -54,8 +63,8 @@ test("owner collapsed strip activates the requested retained editor and saves to
     const current = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
     return { cRevision: current.find((note) => note.id === cId)?.revision,
       dRevision: current.find((note) => note.id === dId)?.revision };
-  }).toEqual({ cRevision: previousNotes.find((note) => note.id === cId).revision + 1,
-    dRevision: previousNotes.find((note) => note.id === dId).revision });
+  }).toEqual({ cRevision: previousC.revision + 1,
+    dRevision: previousD.revision });
   await page.getByRole("button", { name: `${titles[3]} 문서 펼치기`, exact: true }).click();
   await expect(page).toHaveURL((url) => url.searchParams.get("note") === dId);
   await page.getByRole("button", { name: `${titles[2]} 문서 펼치기`, exact: true }).click();
