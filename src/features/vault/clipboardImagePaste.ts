@@ -692,5 +692,8 @@ export function vaultClipboardImageEmbedSource(paths: readonly string[]) {
       throw new Error("붙여넣은 이미지의 안전한 내부 링크를 만들 수 없습니다.");
     }
   });
-  return normalizedPaths.map((path) => `![[${path}]]`).join("\n");
+  if (!normalizedPaths.length) return "";
+  // The caret may be at a heading or inside a paragraph. Keep each generated
+  // embed on its own block, including the exact boundaries used by rollback.
+  return `\n\n${normalizedPaths.map((path) => `![[${path}]]`).join("\n\n")}\n\n`;
 }

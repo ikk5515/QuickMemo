@@ -6,7 +6,7 @@ import { openSearchPanel } from "@codemirror/search";
 import { MarkdownEditorSessionStore } from "./markdownEditorSession";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it, vi } from "vitest";
-import { VAULT_MARKDOWN_IMAGE_ACCEPT } from "./clipboardImagePaste";
+import { VAULT_MARKDOWN_IMAGE_ACCEPT, vaultClipboardImageEmbedSource } from "./clipboardImagePaste";
 import { CodeMirrorMarkdownEditor } from "./CodeMirrorMarkdownEditor";
 import { LivePreviewUpdates } from "./livePreviewUpdates";
 import { DataviewBlock } from "../dataview/DataviewBlock";
@@ -844,6 +844,38 @@ describe("CodeMirrorMarkdownEditor", () => {
       expect(input).toHaveValue("");
     }
   );
+
+  it("renders a selected image inserted before an existing heading as its own live block", async () => {
+    const original = "# Existing heading\n\nOriginal paragraph";
+    const path = "붙여넣은 이미지/Existing heading -1.png";
+    const onChange = vi.fn();
+    const onCommit = vi.fn(async () => true);
+    const renderEmbed = vi.fn(() => <img alt="Inserted encrypted image" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jVJ0AAAAASUVORK5CYII=" />);
+    const rendered = render(<CodeMirrorMarkdownEditor livePreview onChange={onChange}
+      onPasteImages={async () => ({ source: vaultClipboardImageEmbedSource([path]), onCommit })}
+      renderEmbed={renderEmbed} value={original} />);
+    const editor = screen.getByLabelText("Markdown 편집기");
+    const view = EditorView.findFromDOM(editor)!;
+    act(() => view.dispatch({ selection: { anchor: 0 } }));
+    const input = rendered.container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const image = new File([new Uint8Array([1])], "selected.png", { type: "image/png" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "이미지 파일 추가" }));
+      fireEvent.change(input, { target: { files: [image] } });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole("img", { name: "Inserted encrypted image" })).toBeInTheDocument();
+    const inserted = `\n\n![[${path}]]\n\n`;
+    expect(view.state.doc.toString()).toBe(inserted + original);
+    expect(onChange).toHaveBeenLastCalledWith(inserted + original);
+    expect(onCommit).toHaveBeenCalledOnce();
+    expect(renderEmbed).toHaveBeenCalledWith(expect.objectContaining({ embed: true, path }));
+    expect(view.state.doc.lineAt(inserted.length).text).toBe("# Existing heading");
+    expect(rendered.container.querySelectorAll(".cm-editor")).toHaveLength(1);
+    act(() => { undo(view); });
+    expect(view.state.doc.toString()).toBe(original);
+  });
 
   it("uploads a dropped image at the drop position through the shared encrypted handler", async () => {
     const onChange = vi.fn();

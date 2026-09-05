@@ -358,7 +358,7 @@ describe("Vault clipboard source read deadline", () => {
       { signal: state.input.signal, assertCurrent: expect.any(Function) }
     );
     expect(mocks.deleteRevisionedNote).not.toHaveBeenCalled();
-    expect(result?.source).toBe("![[붙여넣은 이미지/현재 작업중인 노트 이름 -1.png]]");
+    expect(result?.source).toBe("\n\n![[붙여넣은 이미지/현재 작업중인 노트 이름 -1.png]]\n\n");
     expect(state.resolveAssetDestination).toHaveBeenCalledOnce();
     expect(state.assertAssetDestinationCurrent).toHaveBeenCalledTimes(2);
     expect(state.pendingCreatedEntryIds).toContain("asset-a");
@@ -393,7 +393,7 @@ describe("Vault clipboard source read deadline", () => {
       "동시 작업 노트 -1.png",
       "동시 작업 노트 -2.png"
     ]);
-    expect(result?.source).toBe("![[붙여넣은 이미지/동시 작업 노트 -2.png]]");
+    expect(result?.source).toBe("\n\n![[붙여넣은 이미지/동시 작업 노트 -2.png]]\n\n");
   });
 
   it("reconciles a subscription acknowledgement that beats the create response", async () => {
@@ -436,6 +436,12 @@ describe("Vault clipboard source read deadline", () => {
     expect(mocks.deleteRevisionedNote).not.toHaveBeenCalled();
     expect(state.releaseAssetDestination).toHaveBeenCalledOnce();
     expect(state.setError).toHaveBeenCalledWith(expect.stringContaining("방금 넣은 링크를 되돌렸습니다"));
+    const source = "\n\n![[붙여넣은 이미지/Source -1.png]]\n\n";
+    expect(result?.source).toBe(source);
+    expect(result?.onRollback?.({ replacementText: "원문", source: source.trim() })).toBe(false);
+    expect(state.rollbackSource).not.toHaveBeenCalled();
+    expect(result?.onRollback?.({ replacementText: "원문", source })).toBe(true);
+    expect(state.rollbackSource).toHaveBeenCalledExactlyOnceWith({ replacementText: "원문", source });
   });
 
   it("never starts a source write when the destination lease cannot be reconfirmed", async () => {

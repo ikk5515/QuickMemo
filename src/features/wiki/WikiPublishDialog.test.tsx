@@ -6,9 +6,9 @@ const api = vi.hoisted(() => ({ status: vi.fn(), legacy: vi.fn(), availability: 
 vi.mock("../../services/publishedWikis", () => ({ getPublishedWikiWorkspaceStatus: api.status, getPublishedWikiOwnerStatus: api.legacy, checkPublishedWikiSlugAvailability: api.availability, setPublishedWikiSlug: api.slug, publishPreparedWiki: api.publish, unpublishWiki: api.unpublish }));
 const emptyStatus = { wikiId: "pw1_internal", slug: "my-notes", revision: 1, published: false, title: "공개 위키", expiresAt: null, updatedAt: null, noteCount: 0, assetCount: 0, selection: { folderIds: [], noteIds: [] } };
 const prepared: PreparedWikiPublication = { manifest: { rootFolderId: null, selection: { folderIds: ["folder"], noteIds: [] }, title: "공개 폴더", expiresAt: null, folders: [{ sourceFolderId: "folder", parentSourceFolderId: null, name: "공개 폴더" }], entries: [{ sourceNoteId: "note", sourceRevision: 1, sourceFolderId: "folder", parentSourceFolderId: "folder", title: "공개 메모", kind: "markdown" }] }, contents: [{ sourceNoteId: "note", body: "게시할 내용" }], totalBytes: 20, omittedEntryCount: 0, redactedLinkCount: 1 };
-function mount(prepare = vi.fn().mockResolvedValue(prepared)) {
+function mount(prepare = vi.fn().mockResolvedValue(prepared), notes = [{ id: "loose", label: "개별 문서" }]) {
   const session = new AbortController(), close = vi.fn(), changed = vi.fn();
-  const view = render(<WikiPublishDialog rootFolderId="folder" folders={[{ id: "folder", label: "공개 폴더" }, { id: "other", label: "다른 폴더" }]} notes={[{ id: "loose", label: "개별 문서" }]} uid="owner" prepare={prepare} sessionSignal={session.signal} onPublicationChange={changed} onClose={close} />);
+  const view = render(<WikiPublishDialog rootFolderId="folder" folders={[{ id: "folder", label: "공개 폴더" }, { id: "other", label: "다른 폴더" }]} notes={notes} uid="owner" prepare={prepare} sessionSignal={session.signal} onPublicationChange={changed} onClose={close} />);
   return { ...view, session, close, prepare, changed };
 }
 const consent = () => screen.getByRole("checkbox", { name: /선택한 범위와 이후/ });
@@ -45,6 +45,33 @@ describe("workspace wiki publication dialog", () => {
     fireEvent.click(consent()); fireEvent.click(screen.getByRole("checkbox", { name: "다른 폴더" }));
     await waitFor(() => expect(prepare).toHaveBeenLastCalledWith({ folderIds: ["folder"], noteIds: ["loose"] }, expect.any(AbortSignal)));
     expect(consent()).not.toBeChecked(); expect(api.publish).not.toHaveBeenCalled();
+  });
+  it("keeps existing grants and requires fresh consent before adding only one searched image", async () => {
+    api.status.mockResolvedValue({ ...emptyStatus, published: true, selection: { folderIds: ["folder"], noteIds: ["loose"] } });
+    const imageTitle = "QuickMemo QA F 20260905 -1.png";
+    const prepare = vi.fn(async (selection) => ({ ...prepared, manifest: { ...prepared.manifest, selection,
+      entries: [...prepared.manifest.entries, ...(selection.noteIds.includes("image-a") ? [{ sourceNoteId: "image-a", sourceRevision: 1,
+        sourceFolderId: "private-images", parentSourceFolderId: null, title: imageTitle, kind: "asset" as const }] : [])] } }));
+    const { changed } = mount(prepare, [{ id: "loose", label: "개별 문서" }, { id: "image-a", label: `비공개 이미지/${imageTitle}` }, { id: "image-b", label: "비공개 이미지/다른 이미지.png" }]);
+    await screen.findByText("공개 메모");
+    fireEvent.click(screen.getByText("개별 메모·이미지", { selector: "summary" }));
+    expect(screen.getByRole("checkbox", { name: "개별 문서" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "공개 폴더" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: `비공개 이미지/${imageTitle}` })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "비공개 이미지/다른 이미지.png" })).not.toBeChecked();
+    fireEvent.change(screen.getByRole("searchbox", { name: "공개 범위 검색" }), { target: { value: imageTitle } });
+    expect(prepare).toHaveBeenLastCalledWith({ folderIds: ["folder"], noteIds: ["loose"] }, expect.any(AbortSignal));
+    fireEvent.click(consent());
+    fireEvent.click(screen.getByRole("checkbox", { name: `비공개 이미지/${imageTitle}` }));
+    await screen.findByText(`이미지 · ${imageTitle}`);
+    expect(prepare).toHaveBeenLastCalledWith({ folderIds: ["folder"], noteIds: ["loose", "image-a"] }, expect.any(AbortSignal));
+    expect(consent()).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "공개 범위 저장" })).toBeDisabled();
+    expect(api.publish).not.toHaveBeenCalled(); expect(api.slug).not.toHaveBeenCalled(); expect(changed).not.toHaveBeenCalled();
+    fireEvent.click(consent()); fireEvent.click(screen.getByRole("button", { name: "공개 범위 저장" }));
+    await waitFor(() => expect(api.publish).toHaveBeenCalledWith(expect.objectContaining({ manifest: expect.objectContaining({
+      selection: { folderIds: ["folder"], noteIds: ["loose", "image-a"] }
+    }) }), 1, expect.objectContaining({ expectedUid: "owner" })));
   });
   it("registers a new readable root before the first publication and uses its returned revision", async () => {
     api.status.mockResolvedValue({ ...emptyStatus, wikiId: null, slug: null, revision: 0 });

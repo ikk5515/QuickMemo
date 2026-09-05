@@ -18,9 +18,10 @@
 .wiki-home-link { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; color: var(--color-text-secondary); font-size: 12px; text-decoration: none; white-space: nowrap; }
 .wiki-home-link:hover { color: var(--color-primary); }
 .wiki-menu-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-muted); }
-.wiki-layout { display: grid; grid-template-columns: var(--wiki-sidebar-width) minmax(0, 1fr) 300px; height: calc(100dvh - var(--wiki-header-height)); margin: 0 auto; transition: grid-template-columns 180ms ease; }
+/* A long folder tree must scroll inside its column, not size the desktop row. */
+.wiki-layout { display: grid; grid-template-columns: var(--wiki-sidebar-width) minmax(0, 1fr) 300px; grid-template-rows: minmax(0, 1fr); min-height: 0; height: calc(100dvh - var(--wiki-header-height)); margin: 0 auto; transition: grid-template-columns 180ms ease; }
 .private-wiki[data-sidebar-open="false"] .wiki-layout { grid-template-columns: 0 minmax(0, 1fr) 300px; }
-.wiki-sidebar { position: relative; z-index: 10; min-width: 0; display: flex; flex-direction: column; height: 100%; border-inline-end: 1px solid var(--color-border-subtle); overscroll-behavior: contain; }
+.wiki-sidebar { position: relative; z-index: 10; min-width: 0; min-height: 0; display: flex; flex-direction: column; height: 100%; border-inline-end: 1px solid var(--color-border-subtle); overscroll-behavior: contain; }
 .private-wiki[data-sidebar-open="false"] .wiki-sidebar { visibility: hidden; pointer-events: none; }
 .wiki-sidebar-content { display: flex; flex-direction: column; gap: 18px; width: 100%; height: 100%; min-width: 0; min-height: 0; padding: 24px 16px 20px 18px; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
 .wiki-tree-actions > button { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; min-height: 32px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--color-text-secondary); }
@@ -165,7 +166,7 @@
 
 @media (min-width: 1700px) { .wiki-graph-box { height: 260px; } }
 @media (max-width: 1199px) {
-  .wiki-layout { grid-template-columns: min(var(--wiki-sidebar-width), calc(100vw - 360px)) minmax(0, 1fr); height: auto; }
+  .wiki-layout { grid-template-columns: min(var(--wiki-sidebar-width), calc(100vw - 360px)) minmax(0, 1fr); grid-template-rows: auto auto; height: auto; }
   .private-wiki[data-sidebar-open="false"] .wiki-layout { grid-template-columns: 0 minmax(0, 1fr); }
   .wiki-sidebar { position: sticky; top: var(--wiki-header-height); height: calc(100dvh - var(--wiki-header-height)); grid-row: 1 / 3; }
   .wiki-panel-stack { height: calc(100dvh - var(--wiki-header-height)); }

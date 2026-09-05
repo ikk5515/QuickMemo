@@ -411,6 +411,12 @@ describe("encrypted Vault clipboard image preparation", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("keeps an empty image batch empty and separates a single image from adjacent prose", () => {
+    expect(vaultClipboardImageEmbedSource([])).toBe("");
+    const source = vaultClipboardImageEmbedSource(["붙여넣은 이미지/문서 -1.png"]);
+    expect(`문단 앞${source}문단 뒤`).toBe("문단 앞\n\n![[붙여넣은 이미지/문서 -1.png]]\n\n문단 뒤");
+  });
+
   it("reserves deterministic extension-preserving names and produces only wiki embeds", () => {
     expect(reserveVaultClipboardImageTitles(
       [],
@@ -434,8 +440,8 @@ describe("encrypted Vault clipboard image preparation", () => {
     ]);
     const paths = titles.map((title) => `붙여넣은 이미지/${title}`);
     expect(vaultClipboardImageEmbedSource(paths)).toBe(
-      "![[붙여넣은 이미지/연구 노트 -2.png]]\n"
-      + "![[붙여넣은 이미지/연구 노트 -3.jpg]]"
+      "\n\n![[붙여넣은 이미지/연구 노트 -2.png]]\n\n"
+      + "![[붙여넣은 이미지/연구 노트 -3.jpg]]\n\n"
     );
     expect(vaultClipboardImageTitleStem("위키 [[제목]] #1 | 50%.md"))
       .toBe("위키 --제목-- -1 - 50-");

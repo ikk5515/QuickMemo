@@ -66,6 +66,30 @@ describe("prepareWikiPublication", () => {
     expect(result.contents).toEqual([{ sourceNoteId: "one", body: "[비공개 링크]" }]);
   });
 
+  it("publishes an explicitly selected note and PNG without granting the image folder or its other PNG", () => {
+    const selection = { folderIds: [], noteIds: ["home", "chosen-image"] };
+    const sources = [
+      note("home", "root", "Home", "![[PrivateAncestor/Confidential/chosen.png]]\n\n![[PrivateAncestor/Confidential/other.png]]"),
+      note("chosen-image", "outside", "chosen.png", encodeVaultAsset(validPng(), "image/png"), { entryKind: "asset", contentFormat: "asset-v1" }),
+      note("other-image", "outside", "other.png", encodeVaultAsset(validPng(), "image/png"), { entryKind: "asset", contentFormat: "asset-v1" })
+    ];
+    const before = JSON.stringify({ sources, folders, selection });
+    const result = prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection, notes: sources, folders });
+
+    expect(result.manifest.selection).toEqual(selection);
+    expect(result.manifest.folders).toEqual([]);
+    expect(result.manifest.entries).toEqual([
+      expect.objectContaining({ sourceNoteId: "home", sourceFolderId: "root", parentSourceFolderId: null, kind: "markdown" }),
+      expect.objectContaining({ sourceNoteId: "chosen-image", sourceFolderId: "outside", parentSourceFolderId: null, kind: "asset" })
+    ]);
+    expect(result.contents.map((content) => content.sourceNoteId)).toEqual(["home", "chosen-image"]);
+    expect(result.contents[0].body).toBe("![[chosen.png|chosen.png]]\n\n[비공개 첨부]");
+    expect(decodeVaultAsset(result.contents[1].body).bytes).toEqual(validPng());
+    expect(result.redactedLinkCount).toBe(1);
+    expect(JSON.stringify(result)).not.toMatch(/PrivateAncestor|Confidential|other-image|other\.png/u);
+    expect(JSON.stringify({ sources, folders, selection })).toBe(before);
+  });
+
   it("rejects explicit selections owned by another account", () => {
     expect(() => prepareWikiPublication({ rootFolderId: null, ownerUid: "other", selection: { folderIds: ["root"], noteIds: [] }, notes: [], folders })).toThrow(/권한/);
     expect(() => prepareWikiPublication({ rootFolderId: null, ownerUid: "owner", selection: { folderIds: [], noteIds: ["foreign"] }, notes: [note("foreign", null, "Foreign", "secret", { ownerUid: "other" })], folders })).toThrow(/권한/);

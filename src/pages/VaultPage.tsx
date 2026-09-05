@@ -197,6 +197,7 @@ import {
   createVaultImportManifest
 } from "../features/vault/importRollback";
 import { decodeVaultAsset } from "../features/vault/vaultAsset";
+import { isWikiPublicationChoice } from "../features/wiki/wikiPublicationChoices";
 import { BoundedVaultAssetDecodeCache } from "../features/vault/vaultAssetCache";
 import type { VaultMarkdownCopyDraft } from "../features/vault/core/formatConverter";
 import type { ComposerEntrySnapshot, NoteComposerAdapter } from "../features/vault/core/noteComposer";
@@ -10982,8 +10983,8 @@ function UnlockedVaultPage({
   });
   const wikiPublishFolders = useMemo(() => folders.filter((folder) => folder.ownerUid === profile.uid && !folder.isDeleted && !folder.nameDecryptionFailed)
     .map((folder) => ({ id: folder.id, label: folderPathsRef.current.get(folder.id) ?? folder.displayName })), [folders, profile.uid]);
-  const wikiPublishNotes = useMemo(() => notes.filter((note) => note.ownerUid === profile.uid && !note.isDeleted && !note.isPurged && (note.entryKind === "markdown" || note.entryKind === "legacy-html"))
-    .map((note) => ({ id: note.id, label: entryPaths.get(note.id) ?? note.title })), [entryPaths, notes, profile.uid]);
+  const wikiPublishNotes = useMemo(() => wikiPublishTarget ? notes.filter((note) => isWikiPublicationChoice(note, profile.uid))
+    .map((note) => ({ id: note.id, label: entryPaths.get(note.id) ?? note.title })) : [], [entryPaths, notes, profile.uid, wikiPublishTarget]);
   const contextMenuCanPublishWiki = contextMenu?.targetKind === "folder"
     && folders.some((folder) => folder.id === contextMenu.targetId && folder.ownerUid === profile.uid && !folder.isDeleted);
 

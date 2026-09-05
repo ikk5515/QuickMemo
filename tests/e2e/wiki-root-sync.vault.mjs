@@ -150,7 +150,7 @@ test("keeps one custom Wiki root while folder descendants sync, explicit grants 
     await expect(dialog.getByRole("checkbox", { name: "동기화 지식", exact: true })).toBeChecked();
     await expect(dialog.getByRole("region", { name: "공개 링크", exact: true }).getByRole("link")).toHaveAttribute("href", publicUrl);
     await dialog.getByRole("searchbox", { name: "공개 범위 검색", exact: true }).fill("개별 공유 항목");
-    await dialog.locator("summary").filter({ hasText: /^개별 메모$/u }).click();
+    await dialog.locator("summary").filter({ hasText: /^개별 메모·이미지$/u }).click();
     await dialog.getByRole("checkbox", { name: /개별 공유 항목/u }).check();
     const expandedPreview = dialog.getByRole("region", { name: "공개할 내용", exact: true });
     await expect(expandedPreview.getByRole("list")).toContainText("처음 공개 문서");
