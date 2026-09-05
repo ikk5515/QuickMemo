@@ -764,7 +764,7 @@ describe("CodeMirrorMarkdownEditor", () => {
     const value = [
       "",
       "# 제목",
-      "**굵게** *기울임* `코드`",
+      "**굵게** *기울임* `코드` ==중요== ^visible-block",
       "[[Folder/Note|별칭]] [문서](https://example.com) #project/quickmemo",
       "- [ ] 확인할 일",
       "> 인용문",
@@ -780,6 +780,8 @@ describe("CodeMirrorMarkdownEditor", () => {
     expect(container.querySelector(".cm-live-strong")).toHaveTextContent("굵게");
     expect(container.querySelector(".cm-live-emphasis")).toHaveTextContent("기울임");
     expect(container.querySelector(".cm-live-inline-code")).toHaveTextContent("코드");
+    expect(container.querySelector(".cm-live-highlight")).toHaveTextContent("중요");
+    expect(container.querySelector(".cm-content")?.textContent).not.toContain("^visible-block");
     expect(container.querySelector(".cm-live-wikilink")).toHaveTextContent("별칭");
     expect(container.querySelector(".cm-live-link")).toHaveTextContent("문서");
     expect(container.querySelector(".cm-live-tag")).toHaveTextContent("#project/quickmemo");

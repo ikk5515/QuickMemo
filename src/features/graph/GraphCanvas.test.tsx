@@ -156,6 +156,30 @@ describe("GraphCanvas", () => {
     expect(screen.getByRole("button", { name: "전체 그래프 북마크" })).toBeDisabled();
   });
 
+  it("keeps the compact accessibility trigger labeled and opens the interactive node list", async () => {
+    const user = userEvent.setup();
+    const onNodeOpen = vi.fn();
+    const { container } = render(<GraphCanvas compactAccessibility edges={edges} nodes={nodes} onNodeOpen={onNodeOpen} renderMode="canvas" settings={createDefaultLocalGraphSettings()} />);
+    await screen.findByTestId("graph-renderer");
+    const details = container.querySelector(".qm-graph-accessibility")!;
+    const trigger = details.querySelector("summary")!;
+    expect(details).toHaveAttribute("data-compact", "true");
+    expect(details).not.toHaveAttribute("open");
+    expect(trigger).toHaveAccessibleName("접근 가능한 그래프 목록");
+    expect(trigger.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
+    await user.click(trigger);
+    await screen.findByRole("list", { name: "그래프 노드" });
+    await user.click(screen.getByRole("button", { name: "프로젝트, 노트, 연결 2개" }));
+    expect(onNodeOpen).toHaveBeenCalledWith(nodes[0], { target: "current" });
+  });
+
+  it("keeps compact-mode fallback messages and the node list visible without Canvas", () => {
+    const { container } = render(<GraphCanvas compactAccessibility edges={edges} nodes={nodes} onNodeOpen={vi.fn()} renderMode="accessible" settings={createDefaultLocalGraphSettings()} />);
+    expect(container.querySelector(".qm-graph-accessibility")).toHaveAttribute("open");
+    expect(screen.getByText("그래프 Canvas를 사용할 수 없어 목록으로 표시합니다.")).toBeVisible();
+    expect(screen.getByRole("list", { name: "그래프 노드" })).toBeVisible();
+  });
+
   it("wires keyboard and toolbar controls to the live renderer without moving browser focus", async () => {
     render(
       <GraphCanvas

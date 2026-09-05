@@ -1,5 +1,6 @@
 /* global Buffer, URLSearchParams, console, crypto, fetch, process */
 import { del } from "@vercel/blob";
+import { cleanupExpiredPublishedWikis } from "./published-wikis.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { quotaReleaseAfterAttachmentClaim } from "./_attachment-policy.js";
 import {
@@ -4955,11 +4956,18 @@ export default async function handler(request, response) {
 
     let stats;
     try {
+      // Public wiki copies share the existing authenticated cron and its lease.
+      // A failure here never prevents the established share/attachment cleanup.
+      let publishedWikiCopiesDeleted = 0;
+      try {
+        publishedWikiCopiesDeleted = await cleanupExpiredPublishedWikis({ projectId: credentials.projectId, accessToken }, Math.min(deadlineAt, Date.now() + 5000));
+      } catch (error) { console.error("published wiki cleanup failed", safeErrorSummary(error)); }
       stats = await cleanupExpiredPublicShares({
         accessToken,
         credentials,
         deadlineAt
       });
+      stats.publishedWikiCopiesDeleted = publishedWikiCopiesDeleted;
       try {
         stats.cleanupHeartbeatWritten = await writeAttachmentCleanupHeartbeat({
           accessToken,

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { KnowledgeWorkerClient } from "../knowledge/knowledgeWorkerClient";
 import { buildKnowledgeIndex, removeKnowledgeIndex, upsertKnowledgeIndex } from "../knowledge/knowledgeIndex";
-import { buildGraphSnapshot, DEFAULT_LOCAL_GRAPH_SETTINGS } from "../knowledge/graph";
+import { buildGraphSnapshot, DEFAULT_LOCAL_GRAPH_SETTINGS, DEFAULT_GLOBAL_GRAPH_SETTINGS } from "../knowledge/graph";
 import { matchesVaultSearchQuery } from "../knowledge/query";
 import type { GraphSnapshot, KnowledgeIndex, MarkdownHeading, ResolvedLinkOccurrence, VaultIndexEntry } from "../knowledge/types";
 import { wikiLiteralSearchQuery, wikiSearchQuery } from "./wikiModel";
@@ -10,6 +10,12 @@ export const WIKI_GRAPH_SETTINGS = {
   ...DEFAULT_LOCAL_GRAPH_SETTINGS,
   common: { ...DEFAULT_LOCAL_GRAPH_SETTINGS.common, existingFilesOnly: true, linkDistance: 110, nodeSize: 1.1 }
 };
+export const WIKI_GLOBAL_GRAPH_SETTINGS = {
+  ...DEFAULT_GLOBAL_GRAPH_SETTINGS,
+  common: WIKI_GRAPH_SETTINGS.common,
+  animate: false
+};
+const EMPTY_PANEL_IDS: readonly string[] = [];
 
 const MAX_INCREMENTAL_WIKI_UPDATES = 200;
 
@@ -111,20 +117,22 @@ function matchesProjection(runtime: Runtime, entries: readonly VaultIndexEntry[]
   );
 }
 
-interface ActiveKnowledge {
-  runtime: Runtime;
+export interface WikiPageKnowledge {
   id: string;
   headings: readonly MarkdownHeading[];
   backlinks: readonly ResolvedLinkOccurrence[];
   outgoing: readonly ResolvedLinkOccurrence[];
-  graph: GraphSnapshot;
 }
+interface ActiveKnowledge extends WikiPageKnowledge { runtime: Runtime; graph: GraphSnapshot }
 
-export function useWikiKnowledge(entries: readonly VaultIndexEntry[], activeId: string | undefined, query: string) {
+export function useWikiKnowledge(entries: readonly VaultIndexEntry[], activeId: string | undefined, query: string,
+  panelIds: readonly string[] = EMPTY_PANEL_IDS, graphMode: "local" | "global" = "local") {
   const [session, setSession] = useState<IndexSession | null>(null);
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [indexError, setIndexError] = useState(false);
   const [active, setActive] = useState<ActiveKnowledge | null>(null);
+  const [pages, setPages] = useState<{ runtime: Runtime; signature: string; byId: ReadonlyMap<string, WikiPageKnowledge> } | null>(null);
+  const panelSignature = JSON.stringify([...new Set([...(activeId ? [activeId] : []), ...panelIds])].slice(0, 6));
   const [results, setResults] = useState<{ runtime: Runtime; query: string; ids: string[]; failed: boolean } | null>(null);
   const currentRuntime = useMemo(() => runtime?.session === session
     && session && !session.disposed && runtime?.generation === session.generation
@@ -166,29 +174,35 @@ export function useWikiKnowledge(entries: readonly VaultIndexEntry[], activeId: 
     let closed = false;
     const controller = new AbortController();
     const { worker, fallback } = currentRuntime;
+    const ids = (JSON.parse(panelSignature) as string[]).filter((id) => currentRuntime.entryById.has(id));
+    const settings = graphMode === "global" ? WIKI_GLOBAL_GRAPH_SETTINGS : WIKI_GRAPH_SETTINGS;
     if (worker) {
       void Promise.all([
-        worker.metadataSummaries([activeId]),
-        worker.backlinks(activeId),
-        worker.outgoingLinks(activeId),
-        worker.localGraphSnapshot(WIKI_GRAPH_SETTINGS, activeId, { signal: controller.signal })
-      ]).then(([metadata, backlinks, outgoing, graph]) => {
-        if (!closed) setActive({ runtime: currentRuntime, id: activeId, headings: metadata[0]?.headings ?? [], backlinks, outgoing, graph });
+        worker.metadataSummaries(ids),
+        Promise.all(ids.map(async (id) => ({ id, backlinks: await worker.backlinks(id), outgoing: await worker.outgoingLinks(id) }))),
+        graphMode === "global" ? worker.globalGraphSnapshot(WIKI_GLOBAL_GRAPH_SETTINGS, { signal: controller.signal })
+          : worker.localGraphSnapshot(WIKI_GRAPH_SETTINGS, activeId, { signal: controller.signal })
+      ]).then(([metadata, connections, graph]) => {
+        if (closed) return;
+        const byId = new Map(connections.map((page) => [page.id, { ...page, headings: metadata.find((item) => item.entryId === page.id)?.headings ?? [] }]));
+        const current = byId.get(activeId);
+        if (current) setActive({ ...current, runtime: currentRuntime, graph });
+        setPages({ runtime: currentRuntime, signature: panelSignature, byId });
       }).catch(() => {
         if (!closed) setIndexError(true);
       });
     } else if (fallback) {
-      setActive({
-        runtime: currentRuntime,
-        id: activeId,
-        headings: fallback.metadataByEntryId.get(activeId)?.headings ?? [],
-        backlinks: fallback.backlinksByEntryId.get(activeId) ?? [],
-        outgoing: fallback.outgoingByEntryId.get(activeId) ?? [],
-        graph: buildGraphSnapshot(fallback, WIKI_GRAPH_SETTINGS, { activeEntryId: activeId, allowRegex: false })
-      });
+      const byId = new Map(ids.map((id) => [id, { id,
+        headings: fallback.metadataByEntryId.get(id)?.headings ?? [],
+        backlinks: fallback.backlinksByEntryId.get(id) ?? [], outgoing: fallback.outgoingByEntryId.get(id) ?? []
+      }]));
+      const current = byId.get(activeId);
+      if (current) setActive({ ...current, runtime: currentRuntime,
+        graph: buildGraphSnapshot(fallback, settings, { activeEntryId: activeId, allowRegex: false }) });
+      setPages({ runtime: currentRuntime, signature: panelSignature, byId });
     }
     return () => { closed = true; controller.abort(); };
-  }, [activeId, currentRuntime]);
+  }, [activeId, currentRuntime, graphMode, panelSignature]);
 
   useEffect(() => {
     if (!currentRuntime || !query.trim()) return;
@@ -212,7 +226,8 @@ export function useWikiKnowledge(entries: readonly VaultIndexEntry[], activeId: 
 
   const currentResults = results?.runtime === currentRuntime && results?.query === query ? results : null;
   return {
-    active: active?.runtime === currentRuntime && active?.id === activeId ? active : null,
+    active: active?.runtime === currentRuntime && active?.id === activeId && active.graph.scope === graphMode ? active : null,
+    pages: pages?.runtime === currentRuntime && pages.signature === panelSignature ? pages.byId : new Map<string, WikiPageKnowledge>(),
     ready: Boolean(currentRuntime),
     indexError,
     searchError: Boolean(currentResults?.failed),

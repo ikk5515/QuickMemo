@@ -11,6 +11,7 @@ import {
   loadLoginPage,
   loadNotesPage,
   loadPublicSharePage,
+  loadPublicWikiPage,
   loadRecurringPage,
   loadSchedulePage,
   loadSetupPage,
@@ -31,6 +32,7 @@ const SchedulePage = lazy(loadSchedulePage);
 const SetupPage = lazy(loadSetupPage);
 const VaultPage = lazy(loadVaultPage);
 const WikiPage = lazy(loadWikiPage);
+const PublicWikiPage = lazy(loadPublicWikiPage);
 
 const obsidianVaultEnabled = import.meta.env.VITE_OBSIDIAN_VAULT_ENABLED === "true";
 
@@ -186,6 +188,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/share/:shareId" element={<PublicSharePage />} />
           <Route path="/s/:compactToken" element={<PublicSharePage />} />
+          <Route path="/wiki/public/:wikiId" element={<PublicWikiPage />} />
           <Route
             path="/home"
             element={

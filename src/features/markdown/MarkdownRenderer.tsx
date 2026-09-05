@@ -1,6 +1,8 @@
 import {
   Fragment,
+  cloneElement,
   createElement,
+  isValidElement,
   useDeferredValue,
   useId,
   useMemo,
@@ -12,6 +14,7 @@ import {
 import { MathExpression } from "./MathExpression";
 import { MermaidDiagram } from "./MermaidDiagram";
 import { tokenizeMarkdown } from "./parser";
+import { createMarkdownHeadingSlugger } from "./headingSlug";
 import type {
   MarkdownBlock,
   MarkdownFootnote,
@@ -44,6 +47,7 @@ export interface MarkdownRendererProps
   renderCodeBlock?: (language: string, source: string) => ReactNode | undefined;
   renderEmbed?: (reference: MarkdownLinkReference) => ReactNode;
   maxCustomEmbeds?: number;
+  documentTitle?: { fallback: string; className: string };
 }
 
 interface InlineRenderOptions {
@@ -56,6 +60,9 @@ interface InlineRenderOptions {
   customEmbedsRendered: number;
   footnotePrefix: string;
   dataviewBlocksRendered: number;
+  documentHeading?: MarkdownBlock;
+  documentTitleClassName?: string;
+  headingIds: ReadonlyMap<MarkdownBlock, string>;
 }
 
 export function MarkdownRenderer({
@@ -68,6 +75,7 @@ export function MarkdownRenderer({
   renderCodeBlock,
   renderEmbed,
   maxCustomEmbeds = Number.POSITIVE_INFINITY,
+  documentTitle,
   ...attributes
 }: MarkdownRendererProps) {
   const reactId = useId();
@@ -78,6 +86,15 @@ export function MarkdownRenderer({
       : null,
     [deferredSource]
   );
+  const firstContentBlock = document?.blocks.find((block) => block.type !== "frontmatter");
+  const documentHeading = firstContentBlock?.type === "heading" && firstContentBlock.level === 1
+    ? firstContentBlock
+    : undefined;
+  const headingIds = new Map<MarkdownBlock, string>();
+  const nextHeadingSlug = createMarkdownHeadingSlugger();
+  for (const block of document?.blocks ?? []) {
+    if (block.type === "heading") headingIds.set(block, nextHeadingSlug(inlinePlainText(block.children)));
+  }
   const options = {
     onLinkClick,
     onLinkPreviewInteraction,
@@ -87,7 +104,10 @@ export function MarkdownRenderer({
     maxCustomEmbeds: Math.max(0, maxCustomEmbeds),
     customEmbedsRendered: 0,
     footnotePrefix: `qm-markdown-${reactId.replace(/[^a-z0-9_-]/giu, "")}`,
-    dataviewBlocksRendered: 0
+    dataviewBlocksRendered: 0,
+    documentHeading,
+    documentTitleClassName: documentTitle?.className,
+    headingIds
   };
 
   return (
@@ -95,6 +115,7 @@ export function MarkdownRenderer({
       {...attributes}
       className={["qm-markdown-renderer", className].filter(Boolean).join(" ")}
     >
+      {documentTitle && !documentHeading ? <h1 className={documentTitle.className}>{documentTitle.fallback}</h1> : null}
       {!document || !document.blocks.length
         ? <p className="qm-markdown-empty">{emptyText}</p>
         : document.blocks.map((block, index) => renderBlock(block, `block-${index}`, options))}
@@ -142,11 +163,31 @@ function internalLinkPreviewBindings(
 }
 
 function renderBlock(block: MarkdownBlock, key: string, options: InlineRenderOptions): ReactNode {
+  const content = renderBlockContent(block, key, options);
+  if (!block.blockId) return content;
+  const anchor = blockAnchorAttributes(block.blockId, key, options);
+  return isValidElement<HTMLAttributes<HTMLElement>>(content) && typeof content.type === "string"
+    ? cloneElement(content, { ...anchor, id: content.props.id ?? anchor.id })
+    : <div key={key} {...anchor}>{content}</div>;
+}
+
+function blockAnchorAttributes(blockId: string | undefined, key: string, options: InlineRenderOptions) {
+  return blockId ? {
+    "data-block-id": blockId,
+    id: `${options.footnotePrefix}-block-${blockId}-${key}`
+  } : {};
+}
+
+function renderBlockContent(block: MarkdownBlock, key: string, options: InlineRenderOptions): ReactNode {
   switch (block.type) {
     case "heading":
       return createElement(
         `h${block.level}`,
-        { key, id: headingId(inlinePlainText(block.children)) },
+        {
+          key,
+          id: options.headingIds.get(block) ?? headingId(inlinePlainText(block.children)),
+          className: block === options.documentHeading ? options.documentTitleClassName : undefined
+        },
         renderInline(block.children, `${key}-inline`, options)
       );
     case "paragraph":
@@ -198,6 +239,7 @@ function renderBlock(block: MarkdownBlock, key: string, options: InlineRenderOpt
             <li
               key={`${key}-item-${itemIndex}`}
               className={item.checked === null ? undefined : "qm-markdown-task"}
+              {...blockAnchorAttributes(item.blockId, `${key}-item-${itemIndex}`, options)}
             >
               {item.checked !== null && (
                 <input
@@ -208,6 +250,9 @@ function renderBlock(block: MarkdownBlock, key: string, options: InlineRenderOpt
                 />
               )}
               <span>{renderInline(item.children, `${key}-item-${itemIndex}`, options)}</span>
+              {item.blocks?.map((child, childIndex) =>
+                renderBlock(child, `${key}-item-${itemIndex}-block-${childIndex}`, options)
+              )}
             </li>
           ))}
         </List>
@@ -336,6 +381,8 @@ function renderInline(
         return <em key={key}>{renderInline(token.children, key, options)}</em>;
       case "delete":
         return <del key={key}>{renderInline(token.children, key, options)}</del>;
+      case "highlight":
+        return <mark key={key}>{renderInline(token.children, key, options)}</mark>;
       case "tag":
         return (
           <button
@@ -448,6 +495,7 @@ function inlinePlainText(tokens: MarkdownInlineToken[]): string {
       case "strong":
       case "emphasis":
       case "delete":
+      case "highlight":
         return inlinePlainText(token.children);
     }
   }).join("");

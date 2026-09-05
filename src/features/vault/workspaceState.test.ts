@@ -401,14 +401,14 @@ describe("vault workspace state", () => {
   });
 
   it("preserves a 280px editor while clamping the desktop right panel", () => {
-    expect(maxVaultRightPanelWidthForViewport(761, true)).toBe(250);
-    expect(maxVaultRightPanelWidthForViewport(768, true, 753)).toBe(250);
-    expect(maxVaultRightPanelWidthForViewport(900, true)).toBe(386);
-    expect(maxVaultRightPanelWidthForViewport(901, true)).toBe(327);
-    expect(maxVaultRightPanelWidthForViewport(761, false)).toBe(417);
+    expect(maxVaultRightPanelWidthForViewport(761, true)).toBe(259);
+    expect(maxVaultRightPanelWidthForViewport(768, true, 753)).toBe(251);
+    expect(maxVaultRightPanelWidthForViewport(900, true)).toBe(398);
+    expect(maxVaultRightPanelWidthForViewport(901, true)).toBe(339);
+    expect(maxVaultRightPanelWidthForViewport(761, false)).toBe(429);
     expect(maxVaultRightPanelWidthForViewport(1_440, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
-    expect(clampVaultRightPanelWidthForViewport(480, 761, true)).toBe(250);
-    expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(250);
+    expect(clampVaultRightPanelWidthForViewport(480, 761, true)).toBe(259);
+    expect(clampVaultRightPanelWidthForViewport(310, 768, true, 753)).toBe(251);
     expect(clampVaultRightPanelWidthForViewport(200, 761, true)).toBe(MIN_VAULT_RIGHT_PANEL_WIDTH);
     expect(maxVaultRightPanelWidthForViewport(390, true)).toBe(MAX_VAULT_RIGHT_PANEL_WIDTH);
   });

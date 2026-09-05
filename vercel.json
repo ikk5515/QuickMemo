@@ -61,7 +61,7 @@
       ]
     },
     {
-      "source": "/(setup|login|home|app|app/legacy|library|schedule|schedule/recurring|admin)",
+      "source": "/(setup|login|home|app|app/legacy|library|wiki|schedule|schedule/recurring|admin)",
       "headers": [
         {
           "key": "Cache-Control",
@@ -104,6 +104,19 @@
         {
           "key": "Strict-Transport-Security",
           "value": "max-age=63072000; includeSubDomains; preload"
+        }
+      ]
+    },
+    {
+      "source": "/wiki/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, private"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
         }
       ]
     },

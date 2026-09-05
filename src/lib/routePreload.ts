@@ -42,6 +42,7 @@ export const loadHomeRedirectPage = memoizeModuleLoader(() => import("../pages/H
 export const loadLibraryPage = memoizeModuleLoader(() => import("../pages/LibraryPage"));
 export const loadLoginPage = memoizeModuleLoader(() => import("../pages/LoginPage"));
 export const loadNotesPage = memoizeModuleLoader(() => import("../pages/NotesPage"));
+export const loadPublicWikiPage = memoizeModuleLoader(() => import("../pages/PublicWikiPage"));
 export const loadPublicSharePage = memoizeModuleLoader(() => import("../pages/PublicSharePage"));
 export const loadRecurringPage = memoizeModuleLoader(() => import("../pages/RecurringPage"));
 export const loadSchedulePage = memoizeModuleLoader(() => import("../pages/SchedulePage"));

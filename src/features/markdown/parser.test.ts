@@ -8,6 +8,117 @@ import {
 } from "./parser";
 
 describe("Markdown parser", () => {
+  it("keeps block identifiers as metadata on paragraphs, list items and structured blocks", () => {
+    const source = [
+      "문단 ^paragraph-1",
+      "",
+      "- 첫 항목 ^item-1",
+      "- 다음 항목",
+      "",
+      "^whole-list",
+      "",
+      "> 인용문",
+      "",
+      "^quote-1",
+      "",
+      "`문자 ^code-1`",
+      "",
+      "\\^escaped",
+      "",
+      "^허용안됨"
+    ].join("\n");
+    const document = tokenizeMarkdown(source);
+    expect(document.blocks).toMatchObject([
+      { type: "paragraph", blockId: "paragraph-1", children: [{ type: "text", value: "문단" }] },
+      { type: "list", blockId: "whole-list", items: [{ blockId: "item-1", children: [{ type: "text", value: "첫 항목" }] }, { children: [{ type: "text", value: "다음 항목" }] }] },
+      { type: "quote", blockId: "quote-1" },
+      { type: "paragraph", children: [{ type: "code", value: "문자 ^code-1" }] },
+      { type: "paragraph", children: [{ type: "text", value: "^escaped" }] },
+      { type: "paragraph", children: [{ type: "text", value: "^허용안됨" }] }
+    ]);
+    expect(source).toContain("^paragraph-1");
+  });
+
+  it("recognizes Setext headings without confusing standalone thematic breaks or list items", () => {
+    expect(tokenizeMarkdown("큰 제목\n===\n\n작은 제목\n---\n\n---\n\n- 항목").blocks).toMatchObject([
+      { type: "heading", level: 1, children: [{ type: "text", value: "큰 제목" }] },
+      { type: "heading", level: 2, children: [{ type: "text", value: "작은 제목" }] },
+      { type: "thematic-break" },
+      { type: "list" }
+    ]);
+  });
+
+  it("preserves Obsidian highlights with nested formatting while keeping code literal", () => {
+    expect(parseMarkdownInline("==중요 **강조** [[Note]]== `==원문==` \\==문자\\==")).toEqual([
+      {
+        type: "highlight",
+        children: [
+          { type: "text", value: "중요 " },
+          { type: "strong", children: [{ type: "text", value: "강조" }] },
+          { type: "text", value: " " },
+          expect.objectContaining({ type: "wikilink", path: "Note" })
+        ]
+      },
+      { type: "text", value: " " },
+      { type: "code", value: "==원문==" },
+      { type: "text", value: " ==문자==" }
+    ]);
+  });
+
+  it("keeps nested lists, task states and continuation blocks attached to their parent item", () => {
+    const document = tokenizeMarkdown([
+      "- [ ] 프로젝트",
+      "  - [x] 조사 [[Research]]",
+      "    1. 자료[^source]",
+      "    2. 요약",
+      "",
+      "  이어지는 **문단**",
+      "- 다음 프로젝트",
+      "",
+      "[^source]: ==출처=="
+    ].join("\n"));
+    expect(document.blocks).toMatchObject([{
+      type: "list",
+      items: [
+        {
+          checked: false,
+          children: [{ type: "text", value: "프로젝트" }],
+          blocks: [
+            {
+              type: "list",
+              items: [{ checked: true, blocks: [{ type: "list", ordered: true, items: [
+                { children: [expect.anything(), expect.objectContaining({ type: "footnote-reference", number: 1 })] },
+                { children: [{ type: "text", value: "요약" }] }
+              ] }] }]
+            },
+            { type: "paragraph", children: expect.arrayContaining([{ type: "strong", children: [{ type: "text", value: "문단" }] }]) }
+          ]
+        },
+        { children: [{ type: "text", value: "다음 프로젝트" }] }
+      ]
+    }]);
+    expect(document.footnotes).toHaveLength(1);
+  });
+
+  it("retains tab-indented child lists and fenced code without flattening their source", () => {
+    const document = tokenizeMarkdown("- 상위\n\t- 하위\n\n  ```md\n  ==원문== [[No link]]\n  ```\n- 끝");
+    expect(document.blocks).toMatchObject([{
+      type: "list", items: [
+        { blocks: [
+          { type: "list", items: [{ children: [{ type: "text", value: "하위" }] }] },
+          { type: "code-block", value: "==원문== [[No link]]" }
+        ] },
+        { children: [{ type: "text", value: "끝" }] }
+      ]
+    }]);
+  });
+
+  it("bounds deeply nested list parsing and retains the remaining literal source", () => {
+    const source = Array.from({ length: 200 }, (_, index) => `${"  ".repeat(index)}- 항목 ${index}`).join("\n");
+    expect(() => tokenizeMarkdown(source)).not.toThrow();
+    expect(JSON.stringify(tokenizeMarkdown(source))).toContain("항목 199");
+  });
+
   it("distinguishes CommonMark hard breaks from soft line endings", () => {
     expect(parseMarkdownInline("첫 줄\\\n둘째 줄\n셋째 줄")).toEqual([
       { type: "text", value: "첫 줄" },

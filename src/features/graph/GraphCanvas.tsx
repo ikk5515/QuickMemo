@@ -68,6 +68,8 @@ function mirrorGraphViewport(element: HTMLElement | null, viewport: GraphViewpor
 }
 
 export interface GraphCanvasProps {
+  /** Small readers can show an icon while keeping the same native details control. */
+  compactAccessibility?: boolean;
   activeNodeId?: string;
   edges: readonly GraphEdge[];
   /** Fit a new graph before interaction; a saved initialViewport takes priority. */
@@ -226,6 +228,7 @@ export function GraphAccessibilityList({
 }
 
 export function GraphCanvas({
+  compactAccessibility = false,
   activeNodeId,
   edges,
   fitOnLoad,
@@ -535,10 +538,13 @@ export function GraphCanvas({
 
       <details
         className="qm-graph-accessibility"
+        data-compact={compactAccessibility || undefined}
         onToggle={(event) => setAccessibilityOpen(event.currentTarget.open)}
         open={accessibilityOpen}
       >
-        <summary>접근 가능한 그래프 목록</summary>
+        <summary aria-label={compactAccessibility ? "접근 가능한 그래프 목록" : undefined} title={compactAccessibility ? "그래프를 목록으로 보기" : undefined}>
+          {compactAccessibility ? <><svg aria-hidden="true" className="qm-graph-accessibility-icon" fill="none" height="17" viewBox="0 0 24 24" width="17"><path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" stroke="currentColor" strokeLinecap="round" strokeWidth="1.8" /></svg><span className="qm-graph-accessibility-label">접근 가능한 그래프 목록</span></> : "접근 가능한 그래프 목록"}
+        </summary>
         {accessibilityOpen ? (
           <GraphAccessibilityList
             activeNodeId={activeNodeId}

@@ -1,4 +1,5 @@
 import { isExternalLinkTarget, normalizeVaultPath } from "./path";
+import { createMarkdownHeadingSlugger } from "../markdown/headingSlug";
 import type {
   FrontmatterScalar,
   FrontmatterValue,
@@ -482,15 +483,6 @@ function uniqueCaseInsensitive(
   return unique;
 }
 
-function headingSlug(text: string): string {
-  return text
-    .normalize("NFC")
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[\s]+/g, "-")
-    .replace(/[^\p{L}\p{M}\p{N}_-]/gu, "");
-}
-
 export function parseObsidianMarkdown(
   entryId: string,
   sourcePath: string,
@@ -498,6 +490,7 @@ export function parseObsidianMarkdown(
   maximumLinkOccurrences = MAX_INTERNAL_LINK_OCCURRENCES_PER_ENTRY,
   maximumTagOccurrences = MAX_TAG_OCCURRENCES_PER_ENTRY
 ): ParsedMarkdownMetadata {
+  const headingSlug = createMarkdownHeadingSlugger();
   const frontmatter = parseFrontmatter(markdown);
   // Official Obsidian 1.13.7 indexes links and tags inside %% comments while
   // still excluding inline and fenced code. Keep unlinked-mention discovery

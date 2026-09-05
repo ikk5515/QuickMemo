@@ -41,6 +41,21 @@ beforeEach(() => { instances.length = 0; vi.stubGlobal("Worker", TestWorker); })
 afterEach(() => vi.unstubAllGlobals());
 
 describe("useWikiKnowledge worker lifecycle", () => {
+  it("shares one authorized index between stacked panels and the expanded global graph", async () => {
+    const { result, rerender } = renderHook(({ ids, scope }) => useWikiKnowledge(entries, "two", "", ids, scope), {
+      initialProps: { ids: ["one", "two", "not-provided"], scope: "local" as "local" | "global" }
+    });
+    await waitFor(() => expect(result.current.pages.get("one")?.headings[0]?.text).toBe("요약"));
+    expect([...result.current.pages.keys()]).toEqual(["two", "one"]);
+    expect(result.current.pages.get("two")?.backlinks[0]?.sourceEntryId).toBe("one");
+    rerender({ ids: ["one", "two"], scope: "global" });
+    await waitFor(() => expect(result.current.active?.graph.scope).toBe("global"));
+    expect(result.current.active?.graph.nodes.map((node) => node.entryId).sort()).toEqual(["one", "two"]);
+    expect(instances).toHaveLength(1);
+    expect(instances[0].received.filter((request) => request.type === "replace-vault")).toHaveLength(1);
+    expect(instances[0].received.filter((request) => request.type === "metadata-summaries").every((request) => request.type === "metadata-summaries" && !request.entryIds?.includes("not-provided"))).toBe(true);
+  });
+
   it("reuses one index while searching and navigating, and terminates it on unmount", async () => {
     const { result, rerender, unmount } = renderHook(({ id, query }) => useWikiKnowledge(entries, id, query), { initialProps: { id: "one", query: "" } });
     await waitFor(() => expect(result.current.active?.headings[0]?.text).toBe("요약"));

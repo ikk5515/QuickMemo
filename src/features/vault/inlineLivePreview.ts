@@ -27,6 +27,8 @@ const STANDARD_LINK_PATTERN = /!?\[([^\]\n]+)\]\(([^)\n]+)\)/gu;
 const INLINE_CODE_PATTERN = /(`+)([^`\n]*?)\1/gu;
 const STRONG_PATTERN = /(\*\*|__)(?=\S)(.+?\S)\1/gu;
 const EMPHASIS_PATTERN = /([*_])(?=\S)(.+?\S)\1/gu;
+const HIGHLIGHT_PATTERN = /(?<![\\=])==(?=\S)([^\n]*?\S)==(?![=])/gu;
+const BLOCK_ID_PATTERN = /(?:^|[\t ])\^[A-Za-z0-9-]+[\t ]*$/u;
 const TAG_PATTERN = /#[\p{L}\p{M}\p{N}_\-/]+/gu;
 const TAG_BOUNDARY_PATTERN = /[\p{L}\p{M}\p{N}_]/u;
 const NUMERIC_TAG_PATTERN = /^#\d+$/u;
@@ -428,6 +430,28 @@ function decorateInactiveLine(
     pushReplace(ranges, to - markerSize, to);
     ranges.push(Decoration.mark({ class: "cm-live-inline-code" }).range(from + markerSize, to - markerSize));
     occupied.push({ from, to });
+  }
+
+  const blockId = text.match(BLOCK_ID_PATTERN);
+  if (blockId) {
+    const from = absolute(blockId.index ?? 0);
+    const to = from + blockId[0].length;
+    if (!overlaps(occupied, from, to)) {
+      pushReplace(ranges, from, to);
+      occupied.push({ from, to });
+    }
+  }
+
+  for (const match of text.matchAll(HIGHLIGHT_PATTERN)) {
+    const from = absolute(match.index);
+    const to = from + match[0].length;
+    // Existing code/link widgets own their source markers. Nested emphasis or
+    // a link inside a highlight may still render without obscuring its target.
+    if (overlaps(occupied, from, from + 2) || overlaps(occupied, to - 2, to)) continue;
+    pushReplace(ranges, from, from + 2);
+    pushReplace(ranges, to - 2, to);
+    ranges.push(Decoration.mark({ class: "cm-live-highlight" }).range(from + 2, to - 2));
+    occupied.push({ from, to: from + 2 }, { from: to - 2, to });
   }
 
   for (const match of text.matchAll(STRONG_PATTERN)) {

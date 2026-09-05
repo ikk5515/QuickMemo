@@ -48,7 +48,8 @@ test("encrypted memos become a private searchable wiki with links, headings and 
   await loginDirectly(page, fixture.viewerAuth, diagnostics);
   await navigateWithinApp(page, "/app");
   const target = await createMemo(page, "연결 지식", "# 연결 지식\n\n## 핵심 개념\n\n위키검색확인용본문\n");
-  const source = await createMemo(page, "위키 시작", "# 나의 지식 노트\n\n## 개요\n\n정리한 메모를 읽는 공간입니다.\n\n[[연결 지식]]\n\n## 실천\n\n- 기록하기\n- 연결하기\n");
+  const readingParagraphs = Array.from({ length: 26 }, (_, index) => `문단 ${index + 1}. 암호화된 메모를 읽고 연결한 자료를 함께 살펴봅니다.`).join("\n\n");
+  const source = await createMemo(page, "위키 시작", `# 나의 지식 노트\n\n## 개요\n\n정리한 메모를 읽는 공간입니다.\n\n${readingParagraphs}\n\n[[연결 지식]]\n\n## 실천\n\n- 기록하기\n- 연결하기\n`);
   const beforeWiki = await ownedVaultNotesState(request, fixture.viewerAuth.uid);
 
   // The explicit new-tab action must flush the active draft without exporting
@@ -59,22 +60,59 @@ test("encrypted memos become a private searchable wiki with links, headings and 
   await expect(reader).toHaveURL((url) => url.pathname === "/wiki" && url.searchParams.get("note") === source.id);
   expect(await reader.evaluate(() => window.opener === null)).toBe(true);
   await unlockEncryptedVault(reader, fixture.viewerAuth.password);
-  await expect(reader.locator(".wiki-title")).toHaveText("위키 시작");
+  await expect(reader.locator(".wiki-title")).toHaveText("나의 지식 노트");
   await reader.close();
 
   // Same-tab navigation retains the unlocked session and does not prompt again.
   await navigateWithinApp(page, `/wiki?note=${source.id}`);
-  await expect(page.locator(".wiki-title")).toHaveText("위키 시작");
+  await expect(page.locator(".wiki-title")).toHaveText("나의 지식 노트");
   await expect(page.locator(".unlock-panel")).toHaveCount(0);
   await expect(page.getByRole("textbox", { name: "Markdown 편집기" })).toHaveCount(0);
-  await expect(page.getByRole("navigation", { name: "현재 메모 목차" }).getByRole("button", { name: "개요", exact: true })).toBeVisible();
-  await page.getByRole("navigation", { name: "현재 메모 목차" }).getByRole("button", { name: "실천", exact: true }).click();
-  await expect(page.locator(".wiki-body h2", { hasText: "실천" })).toBeFocused();
-  await page.locator(".wiki-body").getByRole("button", { name: "연결 지식", exact: true }).click();
-  await expect(page).toHaveURL((url) => url.searchParams.get("note") === target.id);
-  await expect(page.locator(".wiki-title")).toHaveText("연결 지식");
-  await expect(page.getByRole("region", { name: "이 메모를 연결한 메모" }).getByRole("link", { name: /위키 시작/u })).toBeVisible();
+  const sourcePanel = page.locator(`.wiki-panel[data-note-id="${source.id}"]`);
+  const toc = page.getByRole("navigation", { name: "현재 메모 목차" });
+  await expect(toc.getByRole("button", { name: "개요", exact: true })).toBeVisible();
+  if (page.viewportSize().width < 1200) {
+    const layout = await page.evaluate(() => ({
+      contextTop: document.querySelector(".wiki-context").getBoundingClientRect().top + window.scrollY,
+      panelsBottom: document.querySelector(".wiki-panel-stack").getBoundingClientRect().bottom + window.scrollY
+    }));
+    expect(layout.contextTop).toBeGreaterThanOrEqual(layout.panelsBottom - 1);
+  }
+  await toc.getByRole("button", { name: "실천", exact: true }).click();
+  await expect(sourcePanel.locator(".wiki-body h2", { hasText: "실천" })).toBeFocused();
+  await expect(toc.getByRole("button", { name: "실천", exact: true })).toHaveAttribute("aria-current", "location");
+  const sourceLink = sourcePanel.locator(".wiki-body").getByRole("button", { name: "연결 지식", exact: true });
+  await sourceLink.scrollIntoViewIfNeeded();
+  const sourceScroll = await sourcePanel.evaluate((element) => {
+    element.dataset.preservationMarker = "original-source-panel";
+    return element.scrollTop;
+  });
+  expect(sourceScroll).toBeGreaterThan(0);
+  await sourceLink.click();
+  await expect(page).toHaveURL((url) => url.searchParams.get("note") === target.id && url.searchParams.getAll("pane").includes(source.id));
+  const targetPanel = page.locator('.wiki-panel[data-active="true"]');
+  await expect(targetPanel.locator(".wiki-title")).toHaveText("연결 지식");
+  await expect(page.locator(".wiki-panel")).toHaveCount(2);
+  await expect(sourcePanel).toHaveAttribute("data-preservation-marker", "original-source-panel");
+  expect(await sourcePanel.evaluate((element) => element.scrollTop)).toBe(sourceScroll);
+  await expect(targetPanel.getByRole("region", { name: "이 메모를 연결한 메모" }).getByRole("link", { name: /위키 시작/u })).toBeVisible();
+  await expect(toc.getByRole("button", { name: "핵심 개념", exact: true })).toBeVisible();
   await expect(page.locator(".wiki-local-graph canvas")).toBeVisible();
+
+  // Closing and browser history retain the original article, including its
+  // independently scrolled DOM; the search tree remains outside the stack.
+  await targetPanel.getByRole("button", { name: "연결 지식 읽기 패널 닫기", exact: true }).click();
+  await expect(page.locator(".wiki-panel")).toHaveCount(1);
+  await expect(sourcePanel).toHaveAttribute("data-active", "true");
+  expect(await sourcePanel.evaluate((element) => element.scrollTop)).toBe(sourceScroll);
+  await sourceLink.click();
+  await expect(page.locator(".wiki-panel")).toHaveCount(2);
+  await page.goBack();
+  await expect(page.locator(".wiki-panel")).toHaveCount(1);
+  await expect(sourcePanel).toHaveAttribute("data-preservation-marker", "original-source-panel");
+  expect(await sourcePanel.evaluate((element) => element.scrollTop)).toBe(sourceScroll);
+  await sourceLink.click();
+  await expect(page.locator('.wiki-panel[data-active="true"] .wiki-title')).toHaveText("연결 지식");
 
   const search = await revealWikiSearch(page);
   await search.fill("위키검색확인용본문");
@@ -82,6 +120,8 @@ test("encrypted memos become a private searchable wiki with links, headings and 
   await expect(results.getByRole("link", { name: /연결 지식/u })).toBeVisible();
   await expect(results.getByRole("link", { name: /위키 시작/u })).toHaveCount(0);
   await results.getByRole("link", { name: /연결 지식/u }).click();
+  await expect(page.locator(".wiki-panel")).toHaveCount(1);
+  await expect(page.locator(".wiki-title")).toHaveText("연결 지식");
   await expectNoHorizontalOverflow(page);
   for (const theme of ["light", "dark"]) {
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);

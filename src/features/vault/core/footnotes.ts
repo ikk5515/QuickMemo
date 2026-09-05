@@ -106,6 +106,7 @@ function inlineText(tokens: readonly MarkdownInlineToken[]): string {
       case "emphasis":
       case "strong":
       case "delete":
+      case "highlight":
       case "link":
         return inlineText(token.children);
       case "wikilink":
@@ -126,7 +127,10 @@ function blockText(block: MarkdownBlock): string {
     case "frontmatter":
       return block.value;
     case "list":
-      return block.items.map((item) => inlineText(item.children)).join(" ");
+      return block.items.map((item) => [
+        inlineText(item.children),
+        ...(item.blocks?.map(blockText) ?? [])
+      ].join(" ")).join(" ");
     case "quote":
       return block.blocks.map(blockText).join(" ");
     case "callout":

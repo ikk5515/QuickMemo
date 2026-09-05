@@ -119,7 +119,8 @@ export const MAX_NAMED_WORKSPACES = 32;
 export const DEFAULT_VAULT_RIGHT_PANEL_WIDTH = 310;
 export const MIN_VAULT_RIGHT_PANEL_WIDTH = 250;
 export const MAX_VAULT_RIGHT_PANEL_WIDTH = 480;
-const VAULT_RIBBON_WIDTH = 64;
+// Reserve the wider touch ribbon; the 44px desktop ribbon leaves extra breathing room.
+const VAULT_RIBBON_WIDTH = 52;
 const MIN_VAULT_EDITOR_WIDTH = 280;
 export const MAX_NAMED_WORKSPACE_SNAPSHOT_SERIALIZED_BYTES = 12_000;
 export const MAX_NAMED_WORKSPACES_SERIALIZED_BYTES = 300_000;

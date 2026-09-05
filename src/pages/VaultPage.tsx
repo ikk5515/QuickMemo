@@ -15,6 +15,7 @@ import {
   FolderInput,
   FolderPlus,
   GitFork,
+  Globe2,
   Hash,
   History,
   LibraryBig,
@@ -237,6 +238,7 @@ import {
   uniqueNoteTitle
 } from "../features/vault/noteCommands";
 import { detectMarkdownPluginView } from "../features/vault/markdownPluginView";
+import { VaultIconButton } from "../features/vault/VaultIconButton";
 import { useVaultNavigationShortcuts } from "../features/vault/navigation/useVaultNavigationShortcuts";
 import type {
   CommandPaletteItem,
@@ -492,6 +494,7 @@ const LazyVaultHistoryPanel = lazy(() => import("../features/vault/VaultHistoryP
 const LazyVaultTrashDialog = lazy(() => import("../features/vault/VaultTrashDialog").then((module) => ({
   default: module.VaultTrashDialog
 })));
+const LazyWikiPublishDialog = lazy(() => import("../features/wiki/WikiPublishDialog"));
 const LazyVaultShareManagerDialog = lazy(() => import("../features/vault/VaultShareManagerDialog").then((module) => ({
   default: module.VaultShareManagerDialog
 })));
@@ -1854,6 +1857,7 @@ function UnlockedVaultPage({
   const [importRecoveryOpen, setImportRecoveryOpen] = useState(false);
   const [contextMenu, setContextMenu] = useState<VaultContextMenuState | null>(null);
   const [moveTarget, setMoveTarget] = useState<VaultMoveTarget | null>(null);
+  const [wikiPublishTarget, setWikiPublishTarget] = useState<{ folderId: string; returnFocusTo?: HTMLElement | null } | null>(null);
   const [shareTarget, setShareTarget] = useState<VaultShareDialogState | null>(null);
   const [participantShareTarget, setParticipantShareTarget] = useState<VaultShareDialogState | null>(null);
   const decryptGeneration = useRef(0);
@@ -2497,6 +2501,7 @@ function UnlockedVaultPage({
     setQuickSwitcherOpen(false);
     setContextMenu(null);
     setMoveTarget(null);
+    setWikiPublishTarget(null);
     decodedAssetCacheRef.current.clear();
     knowledgeEntriesRef.current.clear();
     knowledgeAccessScopeRef.current = [];
@@ -6412,6 +6417,53 @@ function UnlockedVaultPage({
     if (remainingDirtyEntryIds.length > 0 || unsafeEntryIds.length > 0) {
       throw new Error("저장하지 못한 편집 source가 있어 경로 변경을 시작하지 않았습니다.");
     }
+  }
+
+  async function prepareFolderWikiPublication(rootFolderId: string, signal: AbortSignal) {
+    const assertActive = () => {
+      signal.throwIfAborted();
+      decryptionSession.assertSession(profile.uid, privateKey);
+      const root = foldersRef.current.find((folder) => folder.id === rootFolderId);
+      if (!root || root.ownerUid !== profile.uid || root.isDeleted) throw new Error("공개할 폴더를 다시 확인해 주세요.");
+    };
+    assertActive();
+    const folderIds = new Set([rootFolderId]);
+    const childIds = new Map<string, string[]>();
+    for (const folder of foldersRef.current) {
+      if (folder.ownerUid !== profile.uid || folder.isDeleted || !folder.parentId) continue;
+      const children = childIds.get(folder.parentId) ?? [];
+      children.push(folder.id); childIds.set(folder.parentId, children);
+    }
+    const pending = [rootFolderId];
+    for (let index = 0; index < pending.length; index += 1) {
+      for (const id of childIds.get(pending[index]) ?? []) {
+        if (!folderIds.has(id)) { folderIds.add(id); pending.push(id); }
+      }
+    }
+    const sourceIds = notesRef.current.filter((note) => note.ownerUid === profile.uid && !note.isDeleted && !note.isPurged && note.folderId && folderIds.has(note.folderId)).map((note) => note.id);
+    if (sourceIds.some(clipboardAssetsPendingForEntry) || [...folderIds].some(clipboardAssetsPendingForFolder)) throw new Error("이미지 저장을 마친 뒤 공개 설정을 다시 열어 주세요.");
+    const dirtyEntryIds = sourceIds.filter((id) => draftsRef.current[id]?.dirty);
+    const unsaved = await flushVaultDraftsBeforePathRewriteRecovery({
+      dirtyEntryIds,
+      isDirty: (id) => Boolean(draftsRef.current[id]?.dirty),
+      save: async (id) => { assertActive(); return saveEntryRef.current(id); },
+      waitForMutation: (id) => entryMutationPromisesRef.current.get(id)
+    });
+    assertActive();
+    if (unsaved.length) throw new Error("저장하지 못한 메모가 있습니다. 저장을 완료한 뒤 다시 확인해 주세요.");
+    const unsafe = () => sourceIds.some((id) => {
+      const note = notesRef.current.find((candidate) => candidate.id === id);
+      const draft = draftsRef.current[id];
+      return !note || Boolean(draft && (draft.dirty || draft.baseRevision !== (note.revision ?? 0)));
+    });
+    for (let attempt = 0; unsafe() && attempt < 30; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+      assertActive();
+    }
+    if (unsafe()) throw new Error("최신 저장 내용을 기다리고 있습니다. 잠시 후 다시 확인해 주세요.");
+    const { prepareWikiPublication } = await import("../features/wiki/prepareWikiPublication");
+    assertActive();
+    return prepareWikiPublication({ rootFolderId, notes: notesRef.current, folders: foldersRef.current });
   }
 
   function excludedSharedRewriteSourceCount(pathChanges: readonly {
@@ -10801,6 +10853,12 @@ function UnlockedVaultPage({
     && (contextMenuShareNote.entryKind === "markdown" || contextMenuShareNote.entryKind === "legacy-html")
   );
 
+  const wikiPublishFolder = wikiPublishTarget
+    ? folders.find((folder) => folder.id === wikiPublishTarget.folderId && folder.ownerUid === profile.uid && !folder.isDeleted)
+    : null;
+  const contextMenuCanPublishWiki = contextMenu?.targetKind === "folder"
+    && folders.some((folder) => folder.id === contextMenu.targetId && folder.ownerUid === profile.uid && !folder.isDeleted);
+
   return (
     <AppShell onBeforeExit={flushVaultBeforeExit} variant="vault">
       <div
@@ -10934,15 +10992,15 @@ function UnlockedVaultPage({
           className="vault-ribbon"
           inert={Boolean(activeMobileDrawer)}
         >
-          <button aria-controls="vault-left-panel" aria-expanded={leftOpen} aria-label={leftOpen ? "왼쪽 패널 닫기" : "왼쪽 패널 열기"} onClick={toggleLeftPanel} ref={leftPanelToggleRef} type="button"><Menu aria-hidden="true" size={19} /><span>메뉴</span></button>
-          <button aria-label="파일" aria-pressed={leftOpen && leftMode === "files"} onClick={() => showLeftPanel("files")} type="button"><Files aria-hidden="true" size={19} /><span>메모</span></button>
-          <button aria-label="검색" aria-pressed={leftOpen && leftMode === "search"} onClick={() => showLeftPanel("search")} type="button"><Search aria-hidden="true" size={19} /><span>검색</span></button>
-          <button aria-label="북마크와 워크스페이스" aria-pressed={leftOpen && leftMode === "bookmarks"} onClick={() => showLeftPanel("bookmarks")} type="button"><Bookmark aria-hidden="true" size={19} /><span>북마크</span></button>
+          <VaultIconButton aria-controls="vault-left-panel" aria-expanded={leftOpen} aria-label={leftOpen ? "왼쪽 패널 닫기" : "왼쪽 패널 열기"} onClick={toggleLeftPanel} ref={leftPanelToggleRef} tooltip={leftOpen ? "왼쪽 패널 접기" : "왼쪽 패널 열기"}><Menu aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="파일" aria-pressed={leftOpen && leftMode === "files"} onClick={() => showLeftPanel("files")} tooltip="파일 탐색기"><Files aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="검색" aria-pressed={leftOpen && leftMode === "search"} onClick={() => showLeftPanel("search")} tooltip="메모 검색"><Search aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="북마크와 워크스페이스" aria-pressed={leftOpen && leftMode === "bookmarks"} onClick={() => showLeftPanel("bookmarks")} tooltip="북마크와 워크스페이스"><Bookmark aria-hidden="true" size={19} /></VaultIconButton>
           <span className="vault-ribbon-spacer" />
-          <button aria-label="위키" onClick={() => void navigateAfterSaving(activeEntryId ? `/wiki?note=${encodeURIComponent(activeEntryId)}` : "/wiki")} type="button"><BookOpen aria-hidden="true" size={19} /><span>위키</span></button>
-          <button aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} type="button"><LibraryBig aria-hidden="true" size={19} /><span>자료실</span></button>
-          <button aria-label="일정" onClick={() => void navigateAfterSaving("/schedule")} type="button"><CalendarDays aria-hidden="true" size={19} /><span>일정</span></button>
-          <button aria-label="명령 팔레트" onClick={() => setCommandPaletteOpen(true)} title="명령 팔레트 (Cmd/Ctrl+P)" type="button"><CommandIcon aria-hidden="true" size={19} /><span>명령</span></button>
+          <VaultIconButton aria-label="위키" onClick={() => void navigateAfterSaving(activeEntryId ? `/wiki?note=${encodeURIComponent(activeEntryId)}` : "/wiki")} tooltip="위키에서 읽기"><BookOpen aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="자료실" onClick={() => void navigateAfterSaving("/library")} tooltip="자료실 열기"><LibraryBig aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="일정" onClick={() => void navigateAfterSaving("/schedule")} tooltip="일정 열기"><CalendarDays aria-hidden="true" size={19} /></VaultIconButton>
+          <VaultIconButton aria-label="명령 팔레트" aria-keyshortcuts="Control+p Meta+p" onClick={() => setCommandPaletteOpen(true)} tooltip="명령 팔레트 · ⌘/Ctrl+P"><CommandIcon aria-hidden="true" size={19} /></VaultIconButton>
         </aside>
 
         {activeMobileDrawer ? (
@@ -10979,9 +11037,9 @@ function UnlockedVaultPage({
             </header>
             {leftMode === "files" ? (
               <>
-                <div className="vault-panel-toolbar">
-                  <button aria-label="새 노트" className="vault-create-note" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} type="button"><FilePlus2 aria-hidden="true" size={16} /><span>새 메모</span></button>
-                  <button aria-label="새 폴더" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createFolder()} title="새 폴더" type="button"><FolderPlus aria-hidden="true" size={16} /></button>
+                <div aria-label="파일 만들기" className="vault-panel-toolbar" role="group">
+                  <VaultIconButton aria-label="새 노트" className="vault-create-note" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createEntry("markdown")} tooltip="새 메모 만들기" tooltipPlacement="bottom"><FilePlus2 aria-hidden="true" size={18} /></VaultIconButton>
+                  <VaultIconButton aria-label="새 폴더" disabled={!vaultNameWritesReady || pathRewriteBusy || entryCreationContentLocked} onClick={() => void createFolder()} tooltip="새 폴더 만들기" tooltipPlacement="bottom"><FolderPlus aria-hidden="true" size={18} /></VaultIconButton>
                 </div>
                 {legacyFolderCount > 0 ? (
                   <button className="vault-migration-button" disabled={!vaultNameWritesReady || folderMigrationBusy} onClick={() => void migrateFolders()} type="button">
@@ -11707,7 +11765,7 @@ function UnlockedVaultPage({
               role="menu"
               style={{
                 left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 220)),
-                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenuCanShare ? 190 : 150)))
+                top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - (contextMenuCanShare || contextMenuCanPublishWiki ? 210 : 160)))
               }}
             >
               <button autoFocus onClick={() => {
@@ -11738,6 +11796,11 @@ function UnlockedVaultPage({
                   <Share2 aria-hidden="true" size={14} /> 공유…
                 </button>
               ) : null}
+              {contextMenuCanPublishWiki ? <button role="menuitem" type="button" onClick={() => {
+                const target = contextMenu;
+                closeContextMenu(false);
+                setWikiPublishTarget({ folderId: target.targetId, returnFocusTo: target.returnFocusElement });
+              }}><Globe2 size={14} aria-hidden="true" />폴더 위키 공개…</button> : null}
               {contextMenu.targetKind === "entry" ? (
                 <button className="danger" onClick={() => {
                   const target = contextMenu;
@@ -11758,6 +11821,17 @@ function UnlockedVaultPage({
             </div>
           </div>
         ) : null}
+        {wikiPublishTarget && wikiPublishFolder ? <Suspense fallback={<VaultViewLoading label="위키 공개 설정" />}>
+          <LazyWikiPublishDialog
+            folderName={wikiPublishFolder.displayName}
+            rootFolderId={wikiPublishTarget.folderId}
+            uid={profile.uid}
+            sessionSignal={decryptionSession.signal}
+            prepare={(signal) => prepareFolderWikiPublication(wikiPublishTarget.folderId, signal)}
+            onClose={() => setWikiPublishTarget(null)}
+            returnFocusTo={wikiPublishTarget.returnFocusTo}
+          />
+        </Suspense> : null}
         {moveTarget ? (
           <VaultMoveDialog
             destinations={moveDestinations}

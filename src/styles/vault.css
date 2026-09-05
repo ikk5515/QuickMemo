@@ -39,7 +39,7 @@
 }
 
 .vault-workspace {
-  --vault-rail-size: 64px;
+  --vault-rail-size: 44px;
   --vault-hover: var(--vault-row-hover);
   --vault-surface: var(--vault-panel);
   --vault-surface-muted: var(--vault-panel-muted);
@@ -155,13 +155,17 @@
   flex-direction: column;
   gap: 4px;
   min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 7px 5px;
+  scrollbar-width: thin;
 }
 
 .vault-ribbon button,
 .vault-panel-toolbar button,
 .vault-right-toggle,
 .vault-new-tab,
+.vault-split-direction,
 .vault-left-panel header > button,
 .vault-right-panel > header > button {
   align-items: center;
@@ -174,6 +178,7 @@
   justify-content: center;
   padding: 0;
   width: 32px;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .vault-ribbon button:hover,
@@ -182,31 +187,38 @@
 .vault-left-panel header > button:hover,
 .vault-right-panel > header > button:hover,
 .vault-right-toggle:hover,
-.vault-new-tab:hover {
+.vault-new-tab:hover,
+.vault-split-direction:hover {
   background: var(--vault-row-hover);
   color: var(--ink);
 }
 
 .vault-ribbon button {
-  border-radius: 10px;
-  flex: 0 0 54px;
-  flex-direction: column;
-  gap: 5px;
-  height: 54px;
-  min-width: 44px;
-  width: 52px;
-}
-
-.vault-ribbon button > span {
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
+  flex: 0 0 32px;
+  min-width: 32px;
 }
 
 .vault-ribbon button[aria-pressed="true"] {
   background: var(--vault-accent-soft);
   color: var(--vault-accent);
+}
+
+.vault-icon-tooltip {
+  pointer-events: none;
+  animation: vault-popup-enter 100ms ease-out;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 16%);
+  box-sizing: border-box;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+  max-width: min(260px, calc(100vw - 16px));
+  overflow-wrap: anywhere;
+  padding: 6px 9px;
+  position: fixed;
+  z-index: 110;
 }
 
 .vault-more-tools {
@@ -274,19 +286,13 @@
 }
 
 .vault-panel-toolbar .vault-create-note {
-  background: var(--vault-accent);
-  border-radius: 8px;
-  color: white;
-  flex: 1;
-  gap: 8px;
-  min-height: 40px;
-  padding-inline: 12px;
-  width: auto;
+  background: var(--vault-accent-soft);
+  color: var(--vault-accent);
 }
 
 .vault-panel-toolbar .vault-create-note:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--vault-accent) 88%, black);
-  color: white;
+  background: color-mix(in srgb, var(--vault-accent) 24%, var(--vault-panel));
+  color: var(--ink);
 }
 
 .vault-archived-file {
@@ -396,12 +402,31 @@
 }
 
 .vault-left-panel {
+  animation: vault-panel-enter 150ms ease-out;
   border-inline-end: 1px solid var(--vault-border);
 }
 
 .vault-right-panel {
+  animation: vault-panel-enter 150ms ease-out;
   border-inline-start: 1px solid var(--vault-border);
   position: relative;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .vault-left-panel {
+    --vault-panel-enter-offset: -12px;
+  }
+
+  .vault-right-panel {
+    --vault-panel-enter-offset: 12px;
+  }
+
+  /* Keep the panel boxes, resize handle and fixed move-dialog ancestor still. */
+  .vault-left-panel > :not(.vault-file-tree-shell, .vault-context-backdrop),
+  .vault-left-panel > .vault-file-tree-shell > :not(.vault-context-backdrop),
+  .vault-right-panel > :not(.vault-right-panel-resizer) {
+    animation: vault-panel-content-enter 150ms ease-out;
+  }
 }
 
 .vault-right-panel-resizer {
@@ -534,8 +559,8 @@
   align-items: center;
   display: flex;
   gap: 2px;
-  justify-content: flex-end;
-  padding: 5px 8px 3px;
+  justify-content: flex-start;
+  padding: 3px 8px 5px;
 }
 
 .vault-migration-button {
@@ -1257,6 +1282,7 @@
 }
 
 .vault-new-tab,
+.vault-split-direction,
 .vault-right-toggle {
   flex: 0 0 32px;
   margin: 4px 2px;
@@ -1605,12 +1631,17 @@
 }
 
 .vault-context-menu {
+  animation: vault-popup-enter 120ms ease-out;
   background: var(--vault-panel);
   border: 1px solid var(--vault-border);
   border-radius: 8px;
   box-shadow: 0 12px 36px rgb(0 0 0 / 28%);
   display: grid;
-  min-width: 205px;
+  max-height: calc(100dvh - 16px);
+  max-width: calc(100vw - 16px);
+  min-width: min(205px, calc(100vw - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 5px;
   position: fixed;
 }
@@ -1647,6 +1678,7 @@
 }
 
 .vault-move-dialog {
+  animation: vault-popup-enter 140ms ease-out;
   background: var(--vault-panel);
   border: 1px solid var(--vault-border);
   border-radius: 10px;
@@ -1878,6 +1910,11 @@
 
 .vault-codemirror--live-preview .cm-live-strong {
   font-weight: 720;
+}
+
+.vault-codemirror--live-preview .cm-live-highlight {
+  background: color-mix(in srgb, #e8ba36 32%, transparent);
+  border-radius: 2px;
 }
 
 .vault-codemirror--live-preview .cm-live-emphasis {
@@ -2451,6 +2488,10 @@
 }
 
 @media (max-width: 1024px), (pointer: coarse) {
+  .vault-workspace {
+    --vault-rail-size: 52px;
+  }
+
   .vault-right-panel-resizer {
     inset-inline-start: 0;
     top: 48px;
@@ -2470,6 +2511,7 @@
   .vault-panel-toolbar button,
   .vault-right-toggle,
   .vault-new-tab,
+  .vault-split-direction,
   .vault-left-panel header > button,
   .vault-right-panel > header > button,
   .vault-note-actions button,
@@ -2522,6 +2564,7 @@
   .vault-panel-toolbar button,
   .vault-right-toggle,
   .vault-new-tab,
+  .vault-split-direction,
   .vault-left-panel header > button,
   .vault-right-panel > header > button {
     height: 44px;
@@ -2529,13 +2572,14 @@
   }
 
   .vault-ribbon button {
-    flex: 0 0 54px;
-    height: 54px;
+    flex: 0 0 44px;
+    height: 44px;
     min-width: 44px;
-    width: 52px;
+    width: 44px;
   }
 
   .vault-new-tab,
+  .vault-split-direction,
   .vault-right-toggle,
   .vault-left-panel > header > button,
   .vault-right-panel > header > button {
@@ -2673,10 +2717,6 @@
 }
 
 @media (max-width: 760px) {
-  .vault-workspace {
-    --vault-rail-size: 56px;
-  }
-
   .vault-workspace-conflict {
     align-items: stretch;
     flex-direction: column;
@@ -2731,6 +2771,7 @@
   .vault-mobile-drawer-backdrop {
     --vault-drawer-backdrop: rgb(15 18 24 / 38%);
 
+    animation: vault-panel-enter 140ms ease-out;
     background: var(--vault-drawer-backdrop);
     border: 0;
     border-radius: 0;
@@ -3282,7 +3323,23 @@
   }
 }
 
+@keyframes vault-panel-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes vault-panel-content-enter {
+  from { transform: translateX(var(--vault-panel-enter-offset)); }
+  to { transform: none; }
+}
+
+@keyframes vault-popup-enter {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .vault-icon-tooltip,
   .vault-workspace *,
   .vault-workspace *::before,
   .vault-workspace *::after {

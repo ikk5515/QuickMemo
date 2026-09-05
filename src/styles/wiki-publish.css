@@ -1,0 +1,29 @@
+.wiki-publish-backdrop { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 20px; background: rgb(0 0 0 / 45%); }
+.wiki-publish-dialog { width: min(560px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; overflow: hidden; color: var(--color-text-primary); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: 14px; box-shadow: 0 20px 70px rgb(0 0 0 / 25%); animation: wiki-publish-in 160ms ease-out; }
+.wiki-publish-dialog header, .wiki-publish-dialog footer { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; }
+.wiki-publish-dialog header { border-bottom: 1px solid var(--color-border); }
+.wiki-publish-dialog header > div, .wiki-publish-dialog footer > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.wiki-publish-dialog h2 { margin: 0; font-size: 17px; }
+.wiki-publish-dialog h3 { margin: 0 0 8px; font-size: 14px; }
+.wiki-publish-dialog button { display: inline-flex; gap: 6px; align-items: center; justify-content: center; min-height: 36px; padding: 6px 10px; border: 1px solid var(--color-border); background: var(--color-surface); color: var(--color-text-primary); }
+.wiki-publish-dialog button:hover:not(:disabled) { background: var(--color-surface-muted); }
+.wiki-publish-dialog button.primary { background: var(--color-primary); color: white; border-color: var(--color-primary); }
+.wiki-publish-dialog button.primary:hover:not(:disabled) { background: var(--color-primary-hover); }
+.wiki-publish-dialog button.danger { color: var(--color-danger); }
+.wiki-publish-dialog header > button { border: 0; background: transparent; }
+.wiki-publish-content { padding: 6px 20px 20px; overflow: auto; overscroll-behavior: contain; min-height: 0; overflow-wrap: anywhere; }
+.wiki-publish-content p { font-size: 13px; line-height: 1.65; }
+.wiki-publish-description { color: var(--color-text-muted); }
+.wiki-publish-link { display: grid; gap: 9px; padding: 13px; margin: 16px 0; border: 1px solid var(--color-border); border-radius: 8px; font-size: 12px; }
+.wiki-publish-link a { display: flex; gap: 6px; align-items: flex-start; min-width: 0; overflow-wrap: anywhere; }
+.wiki-publish-link a svg { flex-shrink: 0; }
+.wiki-publish-link button { justify-self: start; }
+.wiki-publish-preview { margin-top: 18px; }
+.wiki-publish-preview ul { max-height: 160px; overflow: auto; margin: 10px 0 16px; padding: 10px 12px 10px 28px; border: 1px solid var(--color-border); border-radius: 8px; font-size: 13px; line-height: 1.8; }
+.wiki-publish-consent { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.6; cursor: pointer; }
+.wiki-publish-consent input { width: 16px; min-width: 16px; height: 16px; min-height: 16px; flex-shrink: 0; margin: 3px 0 0; padding: 0; accent-color: var(--color-primary); }
+.wiki-publish-dialog footer { border-top: 1px solid var(--color-border); }
+.wiki-publish-error { color: var(--color-danger); }
+@keyframes wiki-publish-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 520px) { .wiki-publish-backdrop { padding: 10px; } .wiki-publish-dialog { max-height: calc(100dvh - 20px); } .wiki-publish-dialog header, .wiki-publish-dialog footer { padding: 12px; gap: 6px; } .wiki-publish-content { padding: 4px 12px 14px; } .wiki-publish-dialog button { min-height: 44px; font-size: 12px; } .wiki-publish-dialog footer > div { gap: 4px; } }
+@media (prefers-reduced-motion: reduce) { .wiki-publish-dialog { animation: none; } }

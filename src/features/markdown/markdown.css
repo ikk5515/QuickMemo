@@ -156,14 +156,31 @@
 }
 
 .qm-markdown-task {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
+  display: grid;
+  align-items: start;
+  column-gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
   list-style: none;
 }
 
 .qm-markdown-task input {
+  grid-column: 1;
   margin-top: 0.45em;
+}
+
+.qm-markdown-task > :not(input) {
+  grid-column: 2;
+}
+
+.qm-markdown-renderer li > ul,
+.qm-markdown-renderer li > ol {
+  margin-block: .25em;
+}
+
+.qm-markdown-renderer mark {
+  background: color-mix(in srgb, #e8ba36 32%, transparent);
+  border-radius: 2px;
+  color: inherit;
 }
 
 .qm-markdown-link,

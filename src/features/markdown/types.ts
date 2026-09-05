@@ -31,7 +31,7 @@ export interface MarkdownFootnoteReferenceToken {
 }
 
 export interface MarkdownEmphasisToken {
-  type: "emphasis" | "strong" | "delete";
+  type: "emphasis" | "strong" | "delete" | "highlight";
   children: MarkdownInlineToken[];
 }
 
@@ -98,6 +98,8 @@ export interface MarkdownMathBlock {
 export interface MarkdownListItem {
   checked: boolean | null;
   children: MarkdownInlineToken[];
+  blocks?: MarkdownBlock[];
+  blockId?: string;
 }
 
 export interface MarkdownListBlock {
@@ -141,7 +143,7 @@ export interface MarkdownFrontmatterBlock {
   value: string;
 }
 
-export type MarkdownBlock =
+export type MarkdownBlock = (
   | MarkdownHeadingBlock
   | MarkdownParagraphBlock
   | MarkdownCodeBlock
@@ -151,7 +153,8 @@ export type MarkdownBlock =
   | MarkdownCalloutBlock
   | MarkdownTableBlock
   | MarkdownThematicBreakBlock
-  | MarkdownFrontmatterBlock;
+  | MarkdownFrontmatterBlock
+) & { blockId?: string };
 
 export interface MarkdownDocument {
   blocks: MarkdownBlock[];

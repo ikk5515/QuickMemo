@@ -99,6 +99,8 @@ describe("hosting security headers", () => {
       "/assets/index-AbCdEf12.js/rewritten-document",
       "/index.html",
       "/app",
+      "/wiki",
+      "/wiki/public/pw1_example",
       "/api/blob-attachments",
       "/share/ss2_example",
       "/s/example"
@@ -122,6 +124,8 @@ describe("hosting security headers", () => {
       "/app",
       "/app/legacy",
       "/library",
+      "/wiki",
+      "/wiki/public/pw1_example",
       "/schedule",
       "/schedule/recurring",
       "/admin",

@@ -5,6 +5,7 @@ import type {
   MarkdownFootnoteReferenceToken,
   MarkdownInlineToken,
   MarkdownLinkToken,
+  MarkdownListItem,
   MarkdownTableBlock,
   MarkdownWikiLinkToken
 } from "./types";
@@ -13,7 +14,7 @@ const tagCodePointPattern = /^[\p{L}\p{M}\p{N}\p{Emoji}_/-]$/u;
 const tagValuePattern = /^[\p{L}\p{M}\p{N}\p{Emoji}_/-]+$/u;
 const numericTagPattern = /^\p{N}+$/u;
 const protocolPattern = /^[a-z][a-z\d+.-]*:/i;
-const listPattern = /^(\s{0,3})(?:(\d+)[.)]|([-+*]))\s+(.*)$/;
+const listPattern = /^( {0,3})(?:(\d+)[.)]|([-+*]))[\t ]+(.*)$/;
 const headingPattern = /^\s{0,3}(#{1,6})(?:\s+|$)(.*)$/;
 const fencePattern = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 const quotePattern = /^\s{0,3}>\s?(.*)$/;
@@ -22,6 +23,9 @@ const footnoteDefinitionPattern = /^\s{0,3}\[\^([^\]\s]+)\]:\s*(.*)$/;
 const thematicBreakPattern = /^\s{0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
 const tableDelimiterCellPattern = /^:?-{3,}:?$/;
 const mathFencePattern = /^\s{0,3}\$\$(.*)$/;
+const standaloneBlockIdPattern = /^ {0,3}\^([A-Za-z0-9-]+)[\t ]*$/u;
+const trailingBlockIdPattern = /(?:^|[\t ])\^([A-Za-z0-9-]+)[\t ]*$/u;
+const setextUnderlinePattern = /^ {0,3}(=+|-+)[\t ]*$/u;
 const maximumMarkdownBlockNestingDepth = 64;
 const maximumMarkdownInlineNestingDepth = 32;
 const markdownInlineProbeMultiplier = 12;
@@ -343,6 +347,15 @@ function tokenizeMarkdownAtDepth(source: string, depth: number): MarkdownDocumen
       continue;
     }
 
+    const standaloneBlockId = line.match(standaloneBlockIdPattern);
+    if (standaloneBlockId) {
+      const previous = blocks.at(-1);
+      if (previous && previous.type !== "frontmatter") previous.blockId = standaloneBlockId[1];
+      else blocks.push({ type: "paragraph", children: [], blockId: standaloneBlockId[1] });
+      index += 1;
+      continue;
+    }
+
     const fence = line.match(fencePattern);
     if (fence) {
       const marker = fence[1][0];
@@ -451,8 +464,9 @@ function tokenizeMarkdownAtDepth(source: string, depth: number): MarkdownDocumen
       continue;
     }
 
-    const list = parseList(lines, index);
+    const list = parseList(lines, index, depth);
     if (list) {
+      mergeNestedFootnotes(footnoteDefinitions, list.footnotes);
       blocks.push(list.block);
       index = list.end;
       continue;
@@ -464,11 +478,19 @@ function tokenizeMarkdownAtDepth(source: string, depth: number): MarkdownDocumen
       index < lines.length
       && lines[index].trim()
       && !isBlockStarter(lines, index)
+      && !setextUnderlinePattern.test(lines[index])
     ) {
       paragraph.push(lines[index]);
       index += 1;
     }
-    blocks.push({ type: "paragraph", children: parseMarkdownInline(paragraph.join("\n")) });
+    const paragraphSource = paragraph.join("\n");
+    const blockId = paragraphSource.match(trailingBlockIdPattern);
+    const children = parseMarkdownInline(blockId ? paragraphSource.slice(0, blockId.index) : paragraphSource);
+    const underline = lines[index]?.match(setextUnderlinePattern);
+    blocks.push(underline
+      ? { type: "heading", level: underline[1][0] === "=" ? 1 : 2, children, ...(blockId ? { blockId: blockId[1] } : {}) }
+      : { type: "paragraph", children, ...(blockId ? { blockId: blockId[1] } : {}) });
+    if (underline) index += 1;
   }
 
   return {
@@ -685,10 +707,11 @@ function parseDecoratedSpan(
   context: MarkdownInlineParseContext,
   depth: number
 ) {
-  const candidates: Array<{ marker: string; type: "strong" | "emphasis" | "delete" }> = [
+  const candidates: Array<{ marker: string; type: "strong" | "emphasis" | "delete" | "highlight" }> = [
     { marker: "**", type: "strong" },
     { marker: "__", type: "strong" },
     { marker: "~~", type: "delete" },
+    { marker: "==", type: "highlight" },
     { marker: "*", type: "emphasis" },
     { marker: "_", type: "emphasis" }
   ];
@@ -782,20 +805,36 @@ function parseTable(lines: string[], index: number): { block: MarkdownTableBlock
   };
 }
 
-function parseList(lines: string[], index: number) {
+function listIndentation(line: string) {
+  let width = 0;
+  let characters = 0;
+  while (characters < line.length) {
+    if (line[characters] === " ") width += 1;
+    else if (line[characters] === "\t") width += 4 - width % 4;
+    else break;
+    characters += 1;
+  }
+  return { width, characters };
+}
+
+function parseList(lines: string[], index: number, depth: number) {
   const first = lines[index].match(listPattern);
   if (!first) {
     return null;
   }
   const ordered = Boolean(first[2]);
-  const items: Array<{ checked: boolean | null; children: MarkdownInlineToken[] }> = [];
+  const indentation = first[1].length;
+  const items: MarkdownListItem[] = [];
+  const footnotes: MarkdownFootnote[] = [];
   let end = index;
 
   while (end < lines.length) {
     const match = lines[end].match(listPattern);
-    if (!match || Boolean(match[2]) !== ordered) {
+    if (!match || match[1].length !== indentation || Boolean(match[2]) !== ordered
+      || (!ordered && match[3] !== first[3])) {
       break;
     }
+    const contentIndentation = match[0].length - match[4].length;
     let content = match[4];
     const task = content.match(/^\[([ xX])\]\s*(.*)$/);
     let checked: boolean | null = null;
@@ -806,15 +845,40 @@ function parseList(lines: string[], index: number) {
     end += 1;
 
     const continuation: string[] = [content];
-    while (
-      end < lines.length
-      && /^\s{2,}\S/.test(lines[end])
-      && !listPattern.test(lines[end])
-    ) {
-      continuation.push(lines[end].trimStart());
+    while (end < lines.length) {
+      if (!lines[end].trim()) {
+        let next = end + 1;
+        while (next < lines.length && !lines[next].trim()) next += 1;
+        if (next >= lines.length) break;
+        const following = lines[next].match(listPattern);
+        if (following && following[1].length === indentation) {
+          end = next;
+          break;
+        }
+        if (listIndentation(lines[next]).width < contentIndentation) break;
+        continuation.push("");
+        end = next;
+      }
+      const prefix = listIndentation(lines[end]);
+      if (prefix.width < contentIndentation) break;
+      // Remove only the parent item's indentation, preserving nested lists,
+      // paragraphs and fenced code rather than flattening everything to text.
+      continuation.push(" ".repeat(prefix.width - contentIndentation) + lines[end].slice(prefix.characters));
       end += 1;
     }
-    items.push({ checked, children: parseMarkdownInline(continuation.join("\n")) });
+    const nestedSource = continuation.join("\n");
+    const body = depth >= maximumMarkdownBlockNestingDepth
+      ? shallowMarkdownDocument(nestedSource)
+      : tokenizeMarkdownAtDepth(nestedSource, depth + 1);
+    footnotes.push(...body.footnotes);
+    const firstBlock = body.blocks[0];
+    const children = firstBlock?.type === "paragraph" ? firstBlock.children : [];
+    const nestedBlocks = firstBlock?.type === "paragraph" ? body.blocks.slice(1) : body.blocks;
+    items.push({
+      checked, children,
+      ...(firstBlock?.type === "paragraph" && firstBlock.blockId ? { blockId: firstBlock.blockId } : {}),
+      ...(nestedBlocks.length ? { blocks: nestedBlocks } : {})
+    });
   }
 
   return {
@@ -824,7 +888,8 @@ function parseList(lines: string[], index: number) {
       start: ordered ? Number(first[2]) : 1,
       items
     },
-    end
+    end,
+    footnotes
   };
 }
 
@@ -939,6 +1004,7 @@ function resolveFootnotes(
         token.type === "strong"
         || token.type === "emphasis"
         || token.type === "delete"
+        || token.type === "highlight"
         || token.type === "link"
       ) {
         visitInline(token.children);
@@ -954,7 +1020,10 @@ function resolveFootnotes(
           visitInline(block.children);
           break;
         case "list":
-          block.items.forEach((item) => visitInline(item.children));
+          block.items.forEach((item) => {
+            visitInline(item.children);
+            if (item.blocks) visitBlocks(item.blocks);
+          });
           break;
         case "quote":
           visitBlocks(block.blocks);
@@ -991,6 +1060,7 @@ function isBlockStarter(lines: string[], index: number) {
     || quotePattern.test(line)
     || footnoteDefinitionPattern.test(line)
     || thematicBreakPattern.test(line)
+    || standaloneBlockIdPattern.test(line)
     || listPattern.test(line)
     || Boolean(parseTable(lines, index));
 }

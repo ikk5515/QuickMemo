@@ -95,6 +95,7 @@ const { default: secureShareHandler } = await import("../../api/public-shares-v2
 const { default: vaultFolderHandler } = await import("../../api/vault-folders.js");
 const { default: vaultIntegrityHandler } = await import("../../api/vault-integrity.js");
 const { default: vaultNoteHandler } = await import("../../api/vault-notes.js");
+const { default: publishedWikiHandler } = await import("../../api/published-wikis.js");
 const { createServer: createViteServer } = await import("vite");
 const vite = await createViteServer({
   appType: "spa",
@@ -431,6 +432,10 @@ const server = createServer((request, response) => {
         response.end();
       }
     });
+    return;
+  }
+  if (url.pathname === "/api/published-wikis") {
+    void publishedWikiHandler(request, response);
     return;
   }
   if (url.pathname === "/api/public-shares-v2") {

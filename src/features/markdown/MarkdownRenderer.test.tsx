@@ -1,10 +1,65 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseObsidianMarkdown } from "../knowledge/markdown";
 import { MAX_DATAVIEW_BLOCKS_PER_DOCUMENT, MarkdownRenderer } from "./MarkdownRenderer";
 
 afterEach(cleanup);
 
 describe("MarkdownRenderer", () => {
+  it("matches outline slugs for repeated ATX and Setext titles, including suffix collisions", () => {
+    const source = "# 같은 제목\n\n같은 제목\n---\n\n## 같은 제목-1\n\n## 같은 제목\n\n# !!!\n\n# ???";
+    const expected = ["같은-제목", "같은-제목-1", "같은-제목-1-1", "같은-제목-2", "section", "section-1"];
+    const outline = parseObsidianMarkdown("note", "Note.md", source);
+    const view = render(<MarkdownRenderer source={source} />);
+    expect(outline.headings.map((heading) => heading.slug)).toEqual(expected);
+    expect(Array.from(view.container.querySelectorAll("h1, h2"), (heading) => heading.id)).toEqual(expected);
+    view.rerender(<MarkdownRenderer source="# 같은 제목" />);
+    expect(screen.getByRole("heading")).toHaveAttribute("id", "같은-제목");
+    view.rerender(<MarkdownRenderer source={"# 같은 제목\n\n^heading-block"} />);
+    expect(screen.getByRole("heading")).toHaveAttribute("id", "같은-제목");
+    expect(screen.getByRole("heading")).toHaveAttribute("data-block-id", "heading-block");
+  });
+
+  it("uses the source's first H1 as the document title and adds a fallback only when needed", () => {
+    const view = render(<MarkdownRenderer documentTitle={{ fallback: "File name", className: "wiki-title" }} source={"---\ntags: [one]\n---\n# Actual title\n\n# Later title"} />);
+    expect(screen.queryByRole("heading", { name: "File name" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Actual title" })).toHaveClass("wiki-title");
+    expect(screen.getByRole("heading", { name: "Later title" })).not.toHaveClass("wiki-title");
+    view.rerender(<MarkdownRenderer documentTitle={{ fallback: "File name", className: "wiki-title" }} source="## Section" />);
+    expect(screen.getByRole("heading", { name: "File name" })).toHaveClass("wiki-title");
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+  });
+
+  it("attaches scoped block anchors and hides markers on paragraphs, list items, quotes and tables", () => {
+    const source = "Text ^para\n\n- Item ^item\n\n^list\n\n> Quote\n\n^quote\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n^table";
+    const first = render(<MarkdownRenderer source={source} />);
+    const second = render(<MarkdownRenderer source="Other ^para" />);
+    expect(first.container.querySelector('p[data-block-id="para"]')).toHaveTextContent("Text");
+    expect(first.container.querySelector('li[data-block-id="item"]')).toHaveTextContent("Item");
+    expect(first.container.querySelector('ul[data-block-id="list"]')).not.toBeNull();
+    expect(first.container.querySelector('blockquote[data-block-id="quote"]')).not.toBeNull();
+    expect(first.container.querySelector('[data-block-id="table"] table')).not.toBeNull();
+    expect(first.container.textContent).not.toMatch(/\^(?:para|item|list|quote|table)/u);
+    expect(first.container.querySelector('[data-block-id="para"]')?.id)
+      .not.toBe(second.container.querySelector('[data-block-id="para"]')?.id);
+  });
+
+  it("renders highlighted nested task lists without activating unsafe markup or links", () => {
+    const { container } = render(<MarkdownRenderer source={[
+      "- [ ] ==상위==",
+      "  - [x] **하위** [차단](javascript:alert(1))",
+      "    1. ==<script>alert(1)</script>==",
+      "- 일반 항목"
+    ].join("\n")} />);
+    expect(container.querySelectorAll("ul > li")).toHaveLength(3);
+    expect(container.querySelectorAll("ul > li > ul > li > ol > li")).toHaveLength(1);
+    expect(container.querySelectorAll("mark")).toHaveLength(2);
+    expect(container.querySelector("script, iframe")).toBeNull();
+    expect(screen.getByText("차단").closest("a, button")).toBeNull();
+    expect(screen.getByRole("checkbox", { name: "완료된 작업" })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "미완료 작업" })).not.toBeChecked();
+  });
+
   it("renders a CommonMark hard break as br while retaining a soft line ending as text", () => {
     const { container } = render(
       <MarkdownRenderer source={"첫 줄\\\n둘째 줄\n셋째 줄"} />
