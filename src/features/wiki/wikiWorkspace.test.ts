@@ -63,8 +63,17 @@ describe("ordered Wiki document workspace", () => {
       const layout = wikiWorkspaceLayout(state, width);
       expect(layout.compact).toBe(true); expect(layout.placements).toHaveLength(40);
       expect(layout.placements.filter((panel) => !panel.collapsed).map((panel) => panel.id)).toEqual(["39"]);
-      expect(layout.placements.every((panel) => panel.width === width && panel.x === 0)).toBe(true);
+      expect(layout.placements.every((panel) => panel.width === width)).toBe(true);
+      expect(layout.placements.at(-1)?.x).toBe(0);
+      expect(layout.placements.slice(0, -1).every((panel) => panel.x < 0 && panel.x >= -16)).toBe(true);
     }
+  });
+  it("keeps compact neighbors on their respective side while the active document fills the viewport", () => {
+    const state = reduceWikiWorkspace(opened(), { type: "activate", id: "b" });
+    const layout = wikiWorkspaceLayout(state, 320);
+    expect(layout.placements.map((panel) => [panel.x, panel.collapsed])).toEqual([[-16, true], [0, false], [16, true], [16, true]]);
+    const next = wikiWorkspaceLayout(reduceWikiWorkspace(state, { type: "activate", id: "c" }), 320);
+    expect(next.placements.map((panel) => [panel.x, panel.collapsed])).toEqual([[-16, true], [-16, true], [0, false], [16, true]]);
   });
   it("fills the default available reading area but honors an explicitly resized document", () => {
     const state = opened(["a", "b"]);

@@ -59,7 +59,12 @@ export interface WikiPanelPlacement { id: string; x: number; width: number; coll
 export function wikiWorkspaceLayout(state: WikiWorkspaceState, availableWidth: number) {
   const width = Math.max(0, Number.isFinite(availableWidth) ? availableWidth : 0);
   const compact = width < 480 || width - Math.max(0, state.panels.length - 1) * WIKI_DOCUMENT_STRIP_WIDTH < 280;
-  if (compact) return { compact, placements: state.panels.map((panel) => ({ id: panel.id, x: 0, width, collapsed: panel.id !== state.activeId })) };
+  if (compact) {
+    const activeIndex = state.panels.findIndex((panel) => panel.id === state.activeId);
+    return { compact, placements: state.panels.map((panel, index) => ({ id: panel.id,
+      x: panel.id === state.activeId ? 0 : index < activeIndex ? -16 : 16,
+      width, collapsed: panel.id !== state.activeId })) };
+  }
   const expanded = new Set(state.panels.filter((panel) => !panel.collapsed).map((panel) => panel.id));
   if (state.activeId) expanded.add(state.activeId);
   const activeIndex = state.panels.findIndex((panel) => panel.id === state.activeId);

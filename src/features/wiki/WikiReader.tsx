@@ -101,7 +101,7 @@ export function WikiReader({ notes: suppliedNotes, folders, mode = "private", ti
   const stackRef = useRef<HTMLElement>(null);
   const [stackWidth, setStackWidth] = useState(() => Math.max(320, window.innerWidth - 280 - (window.innerWidth >= 1200 ? 300 : 0)));
   const layout = useMemo(() => wikiWorkspaceLayout(workspace.state, stackWidth), [stackWidth, workspace.state]);
-  const [exiting, setExiting] = useState<{ panel: WikiWorkspacePanel; index: number; x: number }[]>([]);
+  const [exiting, setExiting] = useState<{ panel: WikiWorkspacePanel; index: number; x: number; collapsed: boolean }[]>([]);
   const [closingIds, setClosingIds] = useState<Set<string>>(new Set());
   const closeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const mounted = useRef(true);
@@ -149,7 +149,10 @@ export function WikiReader({ notes: suppliedNotes, folders, mode = "private", ti
       if (!panel) return;
       const reducedMotion = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       if (!reducedMotion) {
-        setExiting((exits) => [...exits.filter((item) => item.panel.id !== id), { panel, index, x: current.layout.placements[index]?.x ?? 0 }]);
+        const placement = current.layout.placements[index];
+        setExiting((exits) => [...exits.filter((item) => item.panel.id !== id), {
+          panel, index, x: placement?.x ?? 0, collapsed: placement?.collapsed ?? true
+        }]);
         closeTimers.current.set(id, setTimeout(() => { closeTimers.current.delete(id); setExiting((current) => current.filter((item) => item.panel.id !== id)); }, 210));
       }
       current.workspace.dispatch({ type: "close", id });
@@ -324,7 +327,10 @@ export function WikiReader({ notes: suppliedNotes, folders, mode = "private", ti
   const renderPanels = workspace.state.panels.map((panel, index) => ({ panel, placement: layout.placements[index], exiting: false }));
   for (const exit of exiting) {
     if (!noteById.has(exit.panel.id) || ids.includes(exit.panel.id)) continue;
-    renderPanels.splice(Math.min(exit.index, renderPanels.length), 0, { panel: exit.panel, placement: { id: exit.panel.id, width: 0, x: exit.x, collapsed: true }, exiting: true });
+    renderPanels.splice(Math.min(exit.index, renderPanels.length), 0, { panel: exit.panel, placement: {
+      id: exit.panel.id, width: layout.compact ? stackWidth : 0, x: layout.compact ? -16 : exit.x,
+      collapsed: exit.collapsed
+    }, exiting: true });
   }
   const previewNote = preview ? noteById.get(preview.id) : undefined;
   const graphContent = graph ? <Suspense fallback={<p className="wiki-muted" role="status">연결을 준비하고 있습니다.</p>}>
