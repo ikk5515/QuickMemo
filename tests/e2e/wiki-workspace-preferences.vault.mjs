@@ -5,7 +5,7 @@ import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow,
   loginDirectly, navigateWithinApp, observePage, seedScenario, unlockEncryptedVault
 } from "./helpers.mjs";
-import { pressVaultEditorModKey, readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { pressVaultEditorModKey, readVaultEditorSource, redoVaultEditor, saveVaultDocument } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
 
 async function memoExplorer(page) {
@@ -187,7 +187,7 @@ test("persists memo and Wiki sidebar preferences while four live editors retain 
   const secondPanel = await openWikiDocument(page, second.title);
   const secondEditor = secondPanel.getByRole("textbox", { name: "Markdown 편집기", exact: true });
   await pressVaultEditorModKey(secondEditor, "z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.body);
-  await pressVaultEditorModKey(secondEditor, "Shift+z"); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.edited);
+  await redoVaultEditor(secondEditor); await expect.poll(() => readVaultEditorSource(secondEditor)).toBe(second.edited);
   await saveWikiEditor(page, secondEditor);
   for (const other of documents.filter((document) => document.id !== second.id)) {
     const editor = page.locator(`.wiki-panel[data-note-id="${other.id}"] .cm-content`);

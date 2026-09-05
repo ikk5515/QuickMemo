@@ -2,14 +2,26 @@ import { expect } from "@playwright/test";
 
 // Playwright's ControlOrMeta follows the test host OS, but CM6 follows the
 // browser platform. An emulated iPhone on Linux therefore needs Meta, not Ctrl.
-export async function pressVaultEditorModKey(editor, key) {
-  const modifier = await editor.evaluate((element) => {
+async function vaultEditorModifier(editor) {
+  return editor.evaluate((element) => {
     const browser = element.ownerDocument.defaultView.navigator;
     const appleMobile = /Apple Computer/u.test(browser.vendor)
       && (/Mobile\/\w+/u.test(browser.userAgent) || browser.maxTouchPoints > 2);
     return appleMobile || /Mac/u.test(browser.platform) ? "Meta" : "Control";
   });
+}
+
+export async function pressVaultEditorModKey(editor, key) {
+  const modifier = await vaultEditorModifier(editor);
   await editor.press(`${modifier}+${key}`);
+}
+
+export async function redoVaultEditor(editor) {
+  const modifier = await vaultEditorModifier(editor);
+  // CM binds Redo to Cmd-Shift-Z on Apple and Ctrl-Y elsewhere. Playwright's
+  // lowercase Shift+z can report key="z" on Linux Firefox, which CM handles
+  // as Ctrl-Z (Undo) before considering the shifted alternative binding.
+  await editor.press(modifier === "Meta" ? "Meta+Shift+Z" : "Control+y");
 }
 
 // Match EditorView.findFromDOM's lookup without adding a production test API.

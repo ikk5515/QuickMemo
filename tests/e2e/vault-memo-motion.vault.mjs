@@ -2,7 +2,7 @@
 import { expect, test } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { expectCleanRuntime, loginDirectly, navigateWithinApp, observePage, seedScenario } from "./helpers.mjs";
-import { pressVaultEditorModKey, readVaultEditorSource, saveVaultDocument } from "./vault-editor-helpers.mjs";
+import { pressVaultEditorModKey, readVaultEditorSource, redoVaultEditor, saveVaultDocument } from "./vault-editor-helpers.mjs";
 
 const sourceFor = (title) => `# ${title}\n\nMotion 검증 본문${title === "Motion A" ? "\n\n긴 문서의 독립적인 스크롤 위치를 보존합니다.".repeat(50) : ""}`;
 
@@ -159,7 +159,7 @@ for (const reducedMotion of ["no-preference", "reduce"]) {
     await expect.poll(() => readVaultEditorSource(editor)).toBe(edited);
     await pressVaultEditorModKey(editor, "z");
     await expect.poll(() => readVaultEditorSource(editor)).toBe(original);
-    await pressVaultEditorModKey(editor, "Shift+z");
+    await redoVaultEditor(editor);
     await expect.poll(() => readVaultEditorSource(editor)).toBe(edited);
     await pressVaultEditorModKey(editor, "z");
     await expect.poll(() => readVaultEditorSource(editor)).toBe(original);
