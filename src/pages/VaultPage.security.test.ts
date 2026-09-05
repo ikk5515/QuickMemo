@@ -76,7 +76,7 @@ describe("VaultPage security boundaries", () => {
 
   it("wipes note-derived plaintext when the authorized folder listener fails", () => {
     const folderSubscription = vaultPageSource.match(
-      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile, vaultIntegrityRetryAttempt\]\);/u
+      /return subscribeNoteFolders\(profile\.uid,[\s\S]*?\n\s{2}\}, \[clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile\.uid, vaultIntegrityRetryAttempt\]\);/u
     )?.[0] ?? "";
     const errorCallback = folderSubscription.match(/\}, \(\) => \{[\s\S]*?\}, \(allFolders, metadata\) =>/u)?.[0] ?? "";
     expect(errorCallback).toContain("clearVaultPlaintextForAccessScope();");

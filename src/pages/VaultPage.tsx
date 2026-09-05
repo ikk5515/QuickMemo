@@ -3497,7 +3497,7 @@ function UnlockedVaultPage({
     noteSubscriptionGenerationRef.current = subscriptionGeneration;
     noteSubscriptionServerReadyRef.current = false;
     setNoteServerReservationSignature(null);
-    if (!privateKey || !profile) {
+    if (!privateKey || !profile.uid) {
       allVisibleNoteSnapshotsRef.current = [];
       activeNoteSnapshotsRef.current = [];
       setRawNotes([]);
@@ -3549,12 +3549,12 @@ function UnlockedVaultPage({
       }
       unsubscribe();
     };
-  }, [clearVaultPlaintextForAccessScope, ownerIdKey, privateKey, profile, vaultIntegrityRetryAttempt]);
+  }, [clearVaultPlaintextForAccessScope, ownerIdKey, privateKey, profile.uid, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
     folderSubscriptionServerReadyRef.current = false;
     setFolderServerReservationSignature(null);
-    if (!privateKey || !profile) {
+    if (!privateKey || !profile.uid) {
       activeFolderSnapshotsRef.current = [];
       allFolderSnapshotsRef.current = [];
       setRawFolders([]);
@@ -3665,7 +3665,7 @@ function UnlockedVaultPage({
         }
       }
     });
-  }, [clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile, vaultIntegrityRetryAttempt]);
+  }, [clearVaultPlaintextForAccessScope, decryptionSession, privateKey, profile.uid, vaultIntegrityRetryAttempt]);
 
   useEffect(() => {
     if (!privateKey || !profile || !noteSnapshotReceived || !folderSnapshotReceived) {

@@ -239,6 +239,10 @@ test("authenticated Vault built-in tools are encrypted, persistent, safe, and re
   const viewportWidth = page.viewportSize()?.width ?? 1280;
   const mobileLayout = viewportWidth <= 760;
   const entryIds = {};
+  // Calendar creation, later template expansion, and reload share one date
+  // fixture even when the real Asia/Seoul clock crosses midnight. Only Date is
+  // fixed; autosave, animation, and network timers continue to run normally.
+  await page.clock.setFixedTime(new Date());
   const todayKey = await currentLocalDateKey(page);
 
   await loginDirectly(page, fixture.viewerAuth, diagnostics);

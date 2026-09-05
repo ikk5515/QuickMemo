@@ -2,33 +2,48 @@
 import { expect, test } from "@playwright/test";
 import { pressVaultEditorModKey } from "./vault-editor-helpers.mjs";
 import { expectVisibleWikiMotionFinished } from "./wiki-motion-helpers.mjs";
+import { observeVaultFailureDiagnostics } from "./vault-failure-diagnostics.mjs";
 import {
   allowExpectedWebKitFirestoreEmulatorUnloadErrors, expectCleanRuntime, expectNoHorizontalOverflow,
   loginDirectly, navigateWithinApp, observePage, openVaultMoreTool, ownedVaultNotesState,
   seedScenario, unlockEncryptedVault
 } from "./helpers.mjs";
 
+const failureDiagnostics = new WeakMap();
+test.afterEach(async ({ page }, testInfo) => {
+  const diagnostics = failureDiagnostics.get(page);
+  try { if (testInfo.status !== testInfo.expectedStatus) await diagnostics?.report(); }
+  finally { diagnostics?.dispose(); failureDiagnostics.delete(page); }
+});
+
 async function createMemo(page, title, body) {
-  const explorer = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
-  const toggle = page.locator('.vault-ribbon button[aria-controls="vault-left-panel"][aria-expanded]');
-  // Wait for the unlocked workspace and restored layout before reading drawer state.
-  // An open phone drawer makes the ribbon inert; absence during loading is not closed.
-  await expect(toggle).toBeAttached();
-  await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending|conflict)$/);
-  if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
-  await expect(explorer).toBeVisible();
-  const create = explorer.getByRole("button", { name: "새 노트", exact: true });
-  await expect(create).toBeEnabled({ timeout: 30_000 });
-  const start = Date.now(); await create.click();
-  await expect(page.getByLabel("노트 이름")).toBeEnabled();
-  const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
-  await expect(editor).toBeEditable(); const readyMs = Date.now() - start;
-  await page.getByLabel("노트 이름").fill(title); await editor.fill(body);
-  await pressVaultEditorModKey(editor, "s");
-  await expect(page.locator(".vault-save-state")).toHaveText("저장됨");
-  const tab = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
-  expect(tab).toMatch(/^entry:/u);
-  return { id: tab.slice("entry:".length), readyMs };
+  const diagnostics = failureDiagnostics.get(page);
+  diagnostics?.beginCreation();
+  try {
+    const explorer = page.locator('.vault-left-panel[aria-label="Vault 탐색기"]');
+    const toggle = page.locator('.vault-ribbon button[aria-controls="vault-left-panel"][aria-expanded]');
+    // Wait for the unlocked workspace and restored layout before reading drawer state.
+    // An open phone drawer makes the ribbon inert; absence during loading is not closed.
+    await expect(toggle).toBeAttached();
+    await expect(page.locator(".vault-workspace")).toHaveAttribute("data-workspace-sync", /^(?:saved|pending|conflict)$/);
+    if (await toggle.getAttribute("aria-expanded") === "false") await page.getByRole("button", { name: "파일", exact: true }).click();
+    await expect(explorer).toBeVisible();
+    const create = explorer.getByRole("button", { name: "새 노트", exact: true });
+    await expect(create).toBeEnabled({ timeout: 30_000 });
+    const start = Date.now(); await create.click(); diagnostics?.mark("create_clicked");
+    await expect(page.getByLabel("노트 이름")).toBeEnabled(); diagnostics?.mark("title_ready");
+    const editor = page.getByRole("textbox", { name: "Markdown 편집기" });
+    await expect(editor).toBeEditable(); diagnostics?.mark("editor_ready"); const readyMs = Date.now() - start;
+    await page.getByLabel("노트 이름").fill(title); await editor.fill(body);
+    await pressVaultEditorModKey(editor, "s"); diagnostics?.mark("save_requested");
+    await expect(page.locator(".vault-save-state")).toHaveText("저장됨"); diagnostics?.mark("saved");
+    const tab = await page.locator('.vault-tab-bar [role="tab"][aria-selected="true"]').getAttribute("id");
+    expect(tab).toMatch(/^entry:/u);
+    return { id: tab.slice("entry:".length), readyMs };
+  } catch (error) {
+    await diagnostics?.report();
+    throw error;
+  }
 }
 async function revealWikiSearch(page) {
   await expect(page.getByRole("main", { name: "위키 읽기 패널" })).toBeVisible();
@@ -49,6 +64,7 @@ async function closeDocument(page, title) {
 }
 
 test("encrypted memos share an editable Wiki workspace with independent documents, headings and isolated browser tabs", async ({ page, request, context }, testInfo) => {
+  failureDiagnostics.set(page, observeVaultFailureDiagnostics(page));
   const fixture = await seedScenario(request, "authenticated-verified");
   const diagnostics = observePage(page);
   await loginDirectly(page, fixture.viewerAuth, diagnostics); await navigateWithinApp(page, "/app");

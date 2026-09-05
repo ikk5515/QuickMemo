@@ -22,7 +22,12 @@ describe("DailyNotesCalendar", () => {
     expect(grid?.querySelectorAll('[role="gridcell"]')).toHaveLength(42);
 
     const cells = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="gridcell"]'));
-    const first = cells.find((cell) => cell.tabIndex === 0)!;
+    expect(cells.filter((cell) => cell.tabIndex === 0)).toHaveLength(1);
+    // Today can be the final trailing cell (September 6 in this fixture).
+    // Start the right-arrow check on a known interior date with a next cell.
+    const first = cells.find((cell) => cell.dataset.date === "2026-08-22")!;
+    fireEvent.focus(first);
+    expect(first.tabIndex).toBe(0);
     const firstIndex = cells.indexOf(first);
     const second = cells[firstIndex + 1]!;
     expect(first).toBeTruthy();
